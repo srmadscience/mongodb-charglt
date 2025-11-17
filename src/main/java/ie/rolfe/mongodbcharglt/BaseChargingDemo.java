@@ -11,10 +11,9 @@ package ie.rolfe.mongodbcharglt;
 
 import com.google.gson.Gson;
 import com.mongodb.MongoException;
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
+import com.mongodb.TransactionOptions;
+import com.mongodb.WriteConcern;
+import com.mongodb.client.*;
 import ie.rolfe.mongodbcharglt.documents.UserTable;
 import org.bson.Document;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
@@ -306,6 +305,7 @@ public abstract class BaseChargingDemo {
 //
 //    }
 //
+
     /**
      *
      * Run a key value store benchmark for userCount users at tpMs transactions per
@@ -321,11 +321,10 @@ public abstract class BaseChargingDemo {
      * @param extraMs
      * @return true if >=90% of requested throughput was achieved.
      * @throws InterruptedException
-
      */
     protected static boolean runKVBenchmark(int userCount, int tpMs, int durationSeconds, int globalQueryFreqSeconds,
-            int jsonsize, MongoClient mainClient, int deltaProportion, int extraMs)
-            throws InterruptedException{
+                                            int jsonsize, MongoClient mainClient, int deltaProportion, int extraMs)
+            throws InterruptedException {
 
         long lastGlobalQueryMs = 0;
 
@@ -385,7 +384,7 @@ public abstract class BaseChargingDemo {
 
                     userState[oursession].startTran();
                     userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                  //TODO  mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
+                    //TODO  mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
                     lockCount++;
 
                 } else {
@@ -396,7 +395,7 @@ public abstract class BaseChargingDemo {
 
                 userState[oursession].startTran();
                 userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-               // mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
+                // mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
                 lockCount++;
 
             } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_LOCKED) {
@@ -543,6 +542,7 @@ public abstract class BaseChargingDemo {
                                                      int globalQueryFreqSeconds, MongoClient mainClient, MongoClient otherClient, int extraMs)
             throws InterruptedException {
 
+        Gson g = new Gson();
         MongoDatabase database = mainClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
 
@@ -622,7 +622,7 @@ public abstract class BaseChargingDemo {
                     final long startMs = System.currentTimeMillis();
                     reportQuotaUsage(mainClient, randomuser, unitsUsed,
                             unitsWanted, users[randomuser].sessionId,
-                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis());
+                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(),g);
                     shc.reportLatency(BaseChargingDemo.REPORT_QUOTA_USAGE, startMs, "REPORT_QUOTA_USAGE", 2000);
                     shc.incCounter(BaseChargingDemo.REPORT_QUOTA_USAGE);
                     users[randomuser].endTran();
@@ -645,7 +645,6 @@ public abstract class BaseChargingDemo {
         }
 
         msg("finished adding transactions to queue");
-        //mainClient.drain(); //TODO
         msg("Queue drained");
 
         long elapsedTimeMs = System.currentTimeMillis() - startMsRun;
@@ -671,31 +670,64 @@ public abstract class BaseChargingDemo {
 
         MongoDatabase restaurantsDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
+        // Sets transaction options
+        TransactionOptions txnOptions = TransactionOptions.builder()
+                .writeConcern(WriteConcern.MAJORITY)
+                .build();
 
-        Document userDoc = collection.find(eq(randomuser)).first();
-        if (userDoc != null) {
-            collection.replaceOne(eq(randomuser), addRandomCredit(userDoc));
+
+        try (ClientSession session = mongoClient.startSession()) {
+            // Uses withTransaction and lambda for transaction operations
+            session.withTransaction(() -> {
+                Document userDoc = collection.find(eq(randomuser)).first();
+                if (userDoc != null) {
+                    collection.replaceOne(eq(randomuser), addRandomCredit(userDoc));
+                }
+
+                return null; // Return value as expected by the lambda
+            }, txnOptions);
+
+        } catch (Exception e) {
+            e.printStackTrace();
         }
 
 
     }
 
 
-    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId) {
-        //    reportQuotaUsage(mainClient,  randomuser, unitsUsed,
-//                            unitsWanted, users[randomuser].sessionId,
-//                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis());
-        Gson g = new Gson();
+    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId, Gson g) {
+
         MongoDatabase restaurantsDatabase = mainClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
-        Document document = collection.find(eq(randomuser)).first();
-        if (document != null) {
-            UserTable theUserTable = new UserTable(document);
-            theUserTable.reportQuotaUsage(unitsUsed, unitsWanted, sessionId, txnId);
-            String jsonObject = g.toJson(theUserTable, UserTable.class);
 
-            collection.replaceOne(eq(randomuser), Document.parse(jsonObject));
+
+
+
+        // Sets transaction options
+        TransactionOptions txnOptions = TransactionOptions.builder()
+                .writeConcern(WriteConcern.MAJORITY)
+                .build();
+
+
+        try (ClientSession session = mainClient.startSession()) {
+            // Uses withTransaction and lambda for transaction operations
+            session.withTransaction(() -> {
+                Document document = collection.find(eq(randomuser)).first();
+                if (document != null) {
+                    UserTable theUserTable = new UserTable(document);
+                    theUserTable.reportQuotaUsage(unitsUsed, unitsWanted, sessionId, txnId);
+                    String jsonObject = g.toJson(theUserTable, UserTable.class);
+
+                    collection.replaceOne(eq(randomuser), Document.parse(jsonObject));
+                }
+
+                return null; // Return value as expected by the lambda
+            }, txnOptions);
+
+        } catch (Exception e) {
+            e.printStackTrace();
         }
+
 
     }
 
