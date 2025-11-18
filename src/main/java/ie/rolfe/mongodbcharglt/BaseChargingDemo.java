@@ -477,7 +477,7 @@ public abstract class BaseChargingDemo {
                 .build();
 
         Bson pk = eq(userKVState.id);
-
+final long startMs = System.currentTimeMillis();
         try (ClientSession session = mongoClient.startSession()) {
             // Uses withTransaction and lambda for transaction operations
             session.withTransaction(() -> {
@@ -492,6 +492,7 @@ public abstract class BaseChargingDemo {
                 return null; // Return value as expected by the lambda
             }, txnOptions);
 
+            shc.reportLatency(BaseChargingDemo.KV_GET, startMs, "KV Get time", 2000);
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -509,7 +510,7 @@ public abstract class BaseChargingDemo {
                 .build();
 
         Bson pk = eq(userKVState.id);
-
+final long startMs = System.currentTimeMillis();
         try (ClientSession session = mongoClient.startSession()) {
             // Uses withTransaction and lambda for transaction operations
             session.withTransaction(() -> {
@@ -531,7 +532,7 @@ public abstract class BaseChargingDemo {
 
                 return null; // Return value as expected by the lambda
             }, txnOptions);
-
+            shc.reportLatency(BaseChargingDemo.KV_PUT, startMs, "KV Put Time", 2000);
         } catch (Exception e) {
             e.printStackTrace();
         }
