@@ -11,6 +11,7 @@ package ie.rolfe.mongodbcharglt.documents;
 import ie.rolfe.mongodbcharglt.ReferenceData;
 import org.bson.Document;
 
+import java.security.SecureRandom;
 import java.util.*;
 
 /**
@@ -36,6 +37,7 @@ public class UserTable extends AbstractBaseTable {
     public long userId;
     public String userJsonObject;
     public Date userLastSeen;
+    public long userSoftLockSessionId = Long.MIN_VALUE;
     public Date userSoftlockExpiry;
 
     public HashMap<Long, UserUsageTable> userUsage = new HashMap<Long, UserUsageTable>();
@@ -43,12 +45,13 @@ public class UserTable extends AbstractBaseTable {
 
     public long balance = 0;
 
-    public UserTable(long userId, String userJsonObject, Date userLastSeen, Date userSoftlockExpiry) {
+    public UserTable(long userId, String userJsonObject, Date userLastSeen, Date userSoftlockExpiry, long userSoftLockSessionId) {
         this.userId = userId;
         _id = userId;
         this.userJsonObject = userJsonObject;
         this.userLastSeen = userLastSeen;
         this.userSoftlockExpiry = userSoftlockExpiry;
+        this.userSoftLockSessionId = userSoftLockSessionId;
     }
 
     public UserTable() {
@@ -63,23 +66,30 @@ public class UserTable extends AbstractBaseTable {
             userJsonObject = document.getString("userJsonObject");
             userLastSeen = getDate(document, "userLastSeen");
             userSoftlockExpiry = getDate(document, "userSoftlockExpiry");
+            userSoftLockSessionId = getLong(document, "userSoftLockSessionId");
 
             Document urtDoc = (Document) document.get("userRecentTransactions");
-            Collection<Object> urtAsObjects = urtDoc.values();
-            Object[] urtEntries = urtAsObjects.toArray();
 
-            for (Object urtEntry : urtEntries) {
-                UserRecentTransactions newTx = new UserRecentTransactions((Document) urtEntry);
-                userRecentTransactions.put(newTx.userTxnId, newTx);
+            if (urtDoc != null) {
+                Collection<Object> urtAsObjects = urtDoc.values();
+                Object[] urtEntries = urtAsObjects.toArray();
+
+                for (Object urtEntry : urtEntries) {
+                    UserRecentTransactions newTx = new UserRecentTransactions((Document) urtEntry);
+                    userRecentTransactions.put(newTx.userTxnId, newTx);
+                }
             }
 
             Document uuDoc = (Document) document.get("userUsage");
-            Collection<Object> uuAsObjects = uuDoc.values();
-            Object[] uuEntries = uuAsObjects.toArray();
 
-            for (Object uuEntry : uuEntries) {
-                UserUsageTable newTx = new UserUsageTable((Document) uuEntry);
-                userUsage.put(newTx.sessionId, newTx);
+            if (uuDoc != null) {
+                Collection<Object> uuAsObjects = uuDoc.values();
+                Object[] uuEntries = uuAsObjects.toArray();
+
+                for (Object uuEntry : uuEntries) {
+                    UserUsageTable newTx = new UserUsageTable((Document) uuEntry);
+                    userUsage.put(newTx.sessionId, newTx);
+                }
             }
         }
 
@@ -91,7 +101,7 @@ public class UserTable extends AbstractBaseTable {
         String purpose = "Created";
         Date createDate = new Date(startMsUpsert);
 
-        UserTable newUser = new UserTable(id, ourJson, createDate, null);
+        UserTable newUser = new UserTable(id, ourJson, createDate, null, Long.MIN_VALUE);
 
         UserRecentTransactions urt = new UserRecentTransactions(id, txnId, createDate, Long.MIN_VALUE, approvedAmount, initialCredit, purpose);
         newUser.addUserRecentTransaction(urt);
@@ -129,6 +139,19 @@ public class UserTable extends AbstractBaseTable {
     public void addUserRecentTransaction(UserRecentTransactions theUserRecentTransaction) {
         userRecentTransactions.put(theUserRecentTransaction.userTxnId, theUserRecentTransaction);
         balance += theUserRecentTransaction.spentAmount;
+    }
+
+    public long lock() {
+
+        if (userSoftlockExpiry == null || userSoftlockExpiry.before(new Date(System.currentTimeMillis() - ReferenceData.LOCK_TIMEOUT_MS))) {
+            SecureRandom secureRandom = new SecureRandom();
+            userSoftLockSessionId = Math.abs(secureRandom.nextLong());
+            userSoftlockExpiry = new Date(System.currentTimeMillis() + ReferenceData.LOCK_TIMEOUT_MS);
+            return (userSoftLockSessionId);
+        }
+
+        return Long.MIN_VALUE;
+
     }
 
     @Override
@@ -302,5 +325,19 @@ public class UserTable extends AbstractBaseTable {
 
     public int getUserUsageCount() {
         return userUsage.size();
+    }
+
+    public void unLock() {
+        userSoftLockSessionId = Long.MIN_VALUE;
+        userSoftlockExpiry = null;
+    }
+
+    public boolean isLockedBySomeoneElse(long lockId) {
+
+        if (userSoftLockSessionId == Long.MIN_VALUE) {
+            return false;
+        }
+
+        return userSoftLockSessionId != lockId;
     }
 }

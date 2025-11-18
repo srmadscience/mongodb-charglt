@@ -22,6 +22,7 @@ import com.mongodb.WriteConcern;
 import com.mongodb.client.*;
 import ie.rolfe.mongodbcharglt.documents.UserTable;
 import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
 
 import java.text.SimpleDateFormat;
@@ -153,8 +154,6 @@ public abstract class BaseChargingDemo {
             }
 
             UserTable newUser = UserTable.getUserTable(ourJson, r.nextInt(initialCredit), i, startMsUpsert);
-
-
             newUser.addCredit(100, "Txn1");
             newUser.reportQuotaUsage(100, 10, 100, "TX2");
             String jsonObject = g.toJson(newUser, UserTable.class);
@@ -277,7 +276,6 @@ public abstract class BaseChargingDemo {
         }
     }
 
-    
 
 //    /**
 //     *
@@ -381,7 +379,7 @@ public abstract class BaseChargingDemo {
 
                     userState[oursession].startTran();
                     userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                    //TODO  mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
+                    GetAndLockUser(mainClient, userState[oursession], oursession);
                     lockCount++;
 
                 } else {
@@ -392,6 +390,7 @@ public abstract class BaseChargingDemo {
 
                 userState[oursession].startTran();
                 userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
+                GetAndLockUser(mainClient, userState[oursession], oursession);
                 // mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
                 lockCount++;
 
@@ -406,12 +405,17 @@ public abstract class BaseChargingDemo {
                     // number. For
                     // large values stored as JSON this can have a dramatic effect on network
                     // bandwidth
+                    UpdateLockedUser(mainClient, userState[oursession],
+                            userState[oursession].getLockId(), getNewLoyaltyCardNumber(r) + "",
+                            ExtraUserData.NEW_LOYALTY_NUMBER);
 //                    mainClient.callProcedure(userState[oursession], "UpdateLockedUser", oursession,
 //                            userState[oursession].getLockId(), getNewLoyaltyCardNumber(r),
 //                            ExtraUserData.NEW_LOYALTY_NUMBER);
                 } else {
                     fullUpdate++;
-//                    mainClient.callProcedure(userState[oursession], "UpdateLockedUser", oursession,
+                    UpdateLockedUser(mainClient, userState[oursession],
+                            userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null);
+//                    mainClient.callProcedure(userState[oursession],  oursession,
 //                            userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null);
                 }
 
@@ -463,6 +467,78 @@ public abstract class BaseChargingDemo {
         return tps / (tpMs * 1000) > .9;
     }
 
+    private static void GetAndLockUser(MongoClient mongoClient, UserKVState userKVState, int sessionId) {
+
+        MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
+        MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
+        // Sets transaction options
+        TransactionOptions txnOptions = TransactionOptions.builder()
+                .writeConcern(WriteConcern.MAJORITY)
+                .build();
+
+        Bson pk = eq(userKVState.id);
+
+        try (ClientSession session = mongoClient.startSession()) {
+            // Uses withTransaction and lambda for transaction operations
+            session.withTransaction(() -> {
+                Document userDoc = collection.find(pk).first();
+                if (userDoc != null) {
+                    UserTable ut = new UserTable(userDoc);
+                    ut.lock();
+                    Document update = new Document("userSoftlockExpiry", ut.userSoftlockExpiry).append("userSoftLockSessionId", ut.userSoftLockSessionId);
+                    collection.replaceOne(pk, update);
+                }
+
+                return null; // Return value as expected by the lambda
+            }, txnOptions);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
+    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId, String jsonPayload, String deltaOperationName) {
+
+        MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
+        MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
+        // Sets transaction options
+        TransactionOptions txnOptions = TransactionOptions.builder()
+                .writeConcern(WriteConcern.MAJORITY)
+                .build();
+
+        Bson pk = eq(userKVState.id);
+
+        try (ClientSession session = mongoClient.startSession()) {
+            // Uses withTransaction and lambda for transaction operations
+            session.withTransaction(() -> {
+                Document userDoc = collection.find(pk).first();
+                if (userDoc != null) {
+                    UserTable ut = new UserTable(userDoc);
+
+                    if (ut.isLockedBySomeoneElse(lockId)) {
+                        userKVState.lockedBySomeoneElseCount++;
+                        msg(userKVState.id + ": locked by session " + ut.userId + " until " + ut.userSoftlockExpiry);
+                    } else {
+
+                        ut.unLock();
+                        Document update = new Document("userSoftlockExpiry", null).append("userSoftLockSessionId", Long.MIN_VALUE).append("jsonPayload", jsonPayload);
+                        collection.replaceOne(pk, update);
+                        userKVState.setLockId(Long.MIN_VALUE);
+                    }
+                }
+
+                return null; // Return value as expected by the lambda
+            }, txnOptions);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+
+    }
+
 
     /**
      * Used when we need to really slow down below 1 tx per ms..
@@ -495,27 +571,24 @@ public abstract class BaseChargingDemo {
         msg("...done");
 
     }
-//
-//    /**
-//     *
-//     * Convenience method to clear outstaning locks between runs
-//     *
-//     * @param mainClient
-//     * @throws IOException
-//     * @throws NoConnectionsException
-//     * @throws ProcCallException
-//     */
-//    protected static void unlockAllRecords(Client mainClient)
-//            throws IOException, NoConnectionsException, ProcCallException {
-//
-//        msg("Clearing locked sessions from prior runs...");
-//
+
+    /**
+     *
+     * Convenience method to clear outstaning locks between runs
+     *
+     * @param mainClient
+     */
+    protected static void unlockAllRecords(MongoClient mainClient) {
+
+        msg("Clearing locked sessions from prior runs...");
+
+        //TODO
 //        mainClient.callProcedure("@AdHoc",
-//                "UPDATE user_table SET user_softlock_sessionid = null, user_softlock_expiry = null WHERE user_softlock_sessionid IS NOT NULL;");
-//        msg("...done");
-//
-//    }
-//
+        //              "UPDATE user_table SET user_softlock_sessionid = null, user_softlock_expiry = null WHERE user_softlock_sessionid IS NOT NULL;");
+        msg("...done");
+
+    }
+
 
     /**
      *
@@ -614,7 +687,7 @@ public abstract class BaseChargingDemo {
                     final long startMs = System.currentTimeMillis();
                     reportQuotaUsage(mainClient, randomuser, unitsUsed,
                             unitsWanted, users[randomuser].sessionId,
-                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(),g);
+                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(), g);
                     shc.reportLatency(BaseChargingDemo.REPORT_QUOTA_USAGE, startMs, "REPORT_QUOTA_USAGE", 2000);
                     shc.incCounter(BaseChargingDemo.REPORT_QUOTA_USAGE);
                     users[randomuser].endTran();
@@ -691,8 +764,6 @@ public abstract class BaseChargingDemo {
 
         MongoDatabase restaurantsDatabase = mainClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
-
-
 
 
         // Sets transaction options

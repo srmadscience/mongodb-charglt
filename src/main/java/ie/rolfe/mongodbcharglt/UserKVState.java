@@ -43,7 +43,6 @@ package ie.rolfe.mongodbcharglt;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
 
 
-
 public class UserKVState {
 
     public static final byte STATUS_UNLOCKED = 0;
@@ -53,10 +52,10 @@ public class UserKVState {
     public static final byte STATUS_LOCKED_BY_SOMEONE_ELSE = 4;
 
     /**
-     * Unique ID given to us by VoltDB that we use to prove that we are the owner of
+     * Unique ID given to  that we use to prove that we are the owner of
      * this lock.
      */
-    String lockId = null;
+    long lockId = Long.MIN_VALUE;
 
     /**
      * ID of user.
@@ -120,7 +119,7 @@ public class UserKVState {
     public int getUserStatus() {
         return userState;
     }
-
+//TODO
 //    @Override
 //    public void clientCallback(ClientResponse arg0) throws Exception {
 //
@@ -171,14 +170,14 @@ public class UserKVState {
     /**
      * @return the lockId
      */
-    public String getLockId() {
+    public long getLockId() {
         return lockId;
     }
 
     /**
      * @param lockId the lockId to set
      */
-    public void setLockId(String lockId) {
+    public void setLockId(long lockId) {
         this.lockId = lockId;
     }
 
