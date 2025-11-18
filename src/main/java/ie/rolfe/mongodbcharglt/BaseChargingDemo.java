@@ -20,6 +20,7 @@ import com.mongodb.MongoException;
 import com.mongodb.TransactionOptions;
 import com.mongodb.WriteConcern;
 import com.mongodb.client.*;
+import com.mongodb.client.result.UpdateResult;
 import ie.rolfe.mongodbcharglt.documents.UserTable;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -30,7 +31,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Random;
 
-import static com.mongodb.client.model.Filters.eq;
+import static com.mongodb.client.model.Filters.*;
+
 
 /**
  * This is an abstract class that contains the actual logic of the demo code.
@@ -54,6 +56,7 @@ public abstract class BaseChargingDemo {
     private static final String CHARGLT_DATABASE = "CHARGLT_DB";
     private static final String CHARGLT_USERS = "CHARGLT_USERS";
     private static final String ADD_CREDIT = "ADD_CREDIT";
+    private static final String CLEAR_LOCK = "CLEAR_LOCK";
     public static SafeHistogramCache shc = SafeHistogramCache.getInstance();
 
     /**
@@ -408,15 +411,10 @@ public abstract class BaseChargingDemo {
                     UpdateLockedUser(mainClient, userState[oursession],
                             userState[oursession].getLockId(), getNewLoyaltyCardNumber(r) + "",
                             ExtraUserData.NEW_LOYALTY_NUMBER);
-//                    mainClient.callProcedure(userState[oursession], "UpdateLockedUser", oursession,
-//                            userState[oursession].getLockId(), getNewLoyaltyCardNumber(r),
-//                            ExtraUserData.NEW_LOYALTY_NUMBER);
                 } else {
                     fullUpdate++;
                     UpdateLockedUser(mainClient, userState[oursession],
                             userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null);
-//                    mainClient.callProcedure(userState[oursession],  oursession,
-//                            userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null);
                 }
 
             }
@@ -477,7 +475,7 @@ public abstract class BaseChargingDemo {
                 .build();
 
         Bson pk = eq(userKVState.id);
-final long startMs = System.currentTimeMillis();
+        final long startMs = System.currentTimeMillis();
         try (ClientSession session = mongoClient.startSession()) {
             // Uses withTransaction and lambda for transaction operations
             session.withTransaction(() -> {
@@ -510,7 +508,7 @@ final long startMs = System.currentTimeMillis();
                 .build();
 
         Bson pk = eq(userKVState.id);
-final long startMs = System.currentTimeMillis();
+        final long startMs = System.currentTimeMillis();
         try (ClientSession session = mongoClient.startSession()) {
             // Uses withTransaction and lambda for transaction operations
             session.withTransaction(() -> {
@@ -579,13 +577,17 @@ final long startMs = System.currentTimeMillis();
      *
      * @param mainClient
      */
-    protected static void unlockAllRecords(MongoClient mainClient) {
+    protected static void unlockAllRecords(MongoClient mongoClient) {
 
         msg("Clearing locked sessions from prior runs...");
+        MongoDatabase restaurantsDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
+        MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
+        Document unlock = new Document("userSoftlockExpiry", null).append("userSoftLockSessionId", Long.MIN_VALUE);
 
-        //TODO
-//        mainClient.callProcedure("@AdHoc",
-        //              "UPDATE user_table SET user_softlock_sessionid = null, user_softlock_expiry = null WHERE user_softlock_sessionid IS NOT NULL;");
+        final long startMs = System.currentTimeMillis();
+        UpdateResult userDoc = collection.updateMany(gt("userSoftlockExpiry",Long.MIN_VALUE),unlock);
+        shc.reportLatency(BaseChargingDemo.CLEAR_LOCK, startMs, "Clear Locks", 10000);
+
         msg("...done");
 
     }
