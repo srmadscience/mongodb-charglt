@@ -1,3 +1,11 @@
+/*
+ * Copyright (C) 2025 David Rolfe
+ *
+ * Use of this source code is governed by an MIT
+ * license that can be found in the LICENSE file or at
+ * https://opensource.org/licenses/MIT.
+ */
+
 package ie.rolfe.mongodbcharglt.documents;
 
 import ie.rolfe.mongodbcharglt.ReferenceData;
