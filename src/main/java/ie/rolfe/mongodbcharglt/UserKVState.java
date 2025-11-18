@@ -114,11 +114,7 @@ public class UserKVState {
      */
     public boolean isTxInFlight() {
 
-        if (txStartMicros > 0) {
-            return true;
-        }
-
-        return false;
+        return txStartMicros > 0;
     }
 
     public int getUserStatus() {
@@ -188,19 +184,18 @@ public class UserKVState {
 
     @Override
     public String toString() {
-        StringBuilder builder = new StringBuilder();
-        builder.append("UserKVState [lockId=");
-        builder.append(lockId);
-        builder.append(", id=");
-        builder.append(id);
-        builder.append(", userState=");
-        builder.append(userState);
-        builder.append(", txStartMs=");
-        builder.append(txStartMicros);
-        builder.append(", lockedBySomeoneElseCount=");
-        builder.append(lockedBySomeoneElseCount);
-        builder.append("]");
-        return builder.toString();
+        String builder = "UserKVState [lockId=" +
+                lockId +
+                ", id=" +
+                id +
+                ", userState=" +
+                userState +
+                ", txStartMs=" +
+                txStartMicros +
+                ", lockedBySomeoneElseCount=" +
+                lockedBySomeoneElseCount +
+                "]";
+        return builder;
     }
 
     /**

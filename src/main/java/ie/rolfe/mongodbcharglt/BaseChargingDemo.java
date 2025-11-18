@@ -348,7 +348,7 @@ public abstract class BaseChargingDemo {
         long currentMs = System.currentTimeMillis();
         int tpThisMs = 0;
 
-        final long endtimeMs = System.currentTimeMillis() + (durationSeconds * 1000);
+        final long endtimeMs = System.currentTimeMillis() + (durationSeconds * 1000L);
 
         // How many transactions we've done...
         int tranCount = 0;
@@ -435,7 +435,7 @@ public abstract class BaseChargingDemo {
         }
 
         // See if we need to do global queries...
-        if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000) < System.currentTimeMillis()) {
+        if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
             lastGlobalQueryMs = System.currentTimeMillis();
 
             queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID);
@@ -469,12 +469,7 @@ public abstract class BaseChargingDemo {
         reportRunLatencyStats(tpMs, tps);
 
         // Declare victory if we got >= 90% of requested TPS...
-        if (tps / (tpMs * 1000) > .9) {
-            return true;
-
-        }
-
-        return false;
+        return tps / (tpMs * 1000) > .9;
     }
 
 
