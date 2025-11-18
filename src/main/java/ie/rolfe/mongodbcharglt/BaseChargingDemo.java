@@ -277,16 +277,7 @@ public abstract class BaseChargingDemo {
         }
     }
 
-    static protected void storeDocument(Document document) {
-        if (document == null) {
-            msg("Document is null...");
-        } else {
-            //UserTable foo = new UserTable(document);
-
-            //msg(foo.toString());
-            //  msg(foo.toString());
-        }
-    }
+    
 
 //    /**
 //     *
