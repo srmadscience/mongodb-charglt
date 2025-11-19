@@ -587,8 +587,8 @@ public abstract class BaseChargingDemo {
     protected static void unlockAllRecords(MongoClient mongoClient) {
 
         msg("Clearing locked sessions from prior runs...");
-        MongoDatabase restaurantsDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
+        MongoDatabase chargingDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
+        MongoCollection<Document> collection = chargingDatabase.getCollection(CHARGLT_USERS);
         BasicDBObject updateFields = new BasicDBObject();
         updateFields.append("userSoftlockExpiry", NO_SESSION);
         updateFields.append("userSoftLockSessionId", NO_SESSION);
