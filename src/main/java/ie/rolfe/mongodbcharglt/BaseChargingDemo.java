@@ -16,10 +16,12 @@
 package ie.rolfe.mongodbcharglt;
 
 import com.google.gson.Gson;
+import com.mongodb.BasicDBObject;
 import com.mongodb.MongoException;
 import com.mongodb.TransactionOptions;
 import com.mongodb.WriteConcern;
 import com.mongodb.client.*;
+import com.mongodb.client.result.DeleteResult;
 import com.mongodb.client.result.UpdateResult;
 import ie.rolfe.mongodbcharglt.documents.UserTable;
 import org.bson.Document;
@@ -31,8 +33,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Random;
 
-import static com.mongodb.client.model.Filters.*;
-
+import static com.mongodb.client.model.Filters.eq;
+import static com.mongodb.client.model.Filters.gt;
 
 /**
  * This is an abstract class that contains the actual logic of the demo code.
@@ -41,13 +43,13 @@ public abstract class BaseChargingDemo {
 
     public static final long GENERIC_QUERY_USER_ID = 42;
     public static final int HISTOGRAM_SIZE_MS = 1000000;
+    public static final long NO_SESSION = Long.MIN_VALUE;
 
     public static final String REPORT_QUOTA_USAGE = "ReportQuotaUsage";
     public static final String KV_PUT = "KV_PUT";
     public static final String KV_GET = "KV_GET";
     public static final String DELETE_DOC = "Delete Doc";
     public static final String DELETE_DOC_ERROR = "Delete Doc Error";
-    public static final String DELETE_COUNT = "Delete Count";
     public static final String ADD_DOC = "Add Doc";
     public static final String ADD_DOC_ERROR = "Add Doc Error";
     public static final String UNABLE_TO_MEET_REQUESTED_TPS = "UNABLE_TO_MEET_REQUESTED_TPS";
@@ -86,20 +88,16 @@ public abstract class BaseChargingDemo {
 
 
         String uri = "mongodb://" + connectionString + ":" + MONGO_DEFAULT_PORT + "/";
-
-
         MongoClient mongoClient = null;
 
         // Create a new client and connect to the server
         try {
-
             mongoClient = MongoClients.create(uri);
-
         } catch (MongoException e) {
             e.printStackTrace();
         }
-        return mongoClient;
 
+        return mongoClient;
     }
 
     /**
@@ -138,11 +136,8 @@ public abstract class BaseChargingDemo {
         Random r = new Random();
         Gson g = new Gson();
 
-        ArrayList<UserTable> userTableEntries = new ArrayList<UserTable>();
-
         MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
-
 
         for (int i = 0; i < userCount; i++) {
 
@@ -164,7 +159,7 @@ public abstract class BaseChargingDemo {
             Document document2 = Document.parse(jsonObject);
             final long startMs = System.currentTimeMillis();
             collection.insertOne(document2);
-            shc.reportLatency(BaseChargingDemo.ADD_DOC, startMs, "Delete time", 2000);
+            shc.reportLatency(BaseChargingDemo.ADD_DOC, startMs, "Add time", 2000);
             shc.incCounter(BaseChargingDemo.ADD_DOC);
 
             if (i % 100000 == 1) {
@@ -196,7 +191,6 @@ public abstract class BaseChargingDemo {
         long currentMs = System.currentTimeMillis();
         int tpThisMs = 0;
 
-
         MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
 
@@ -217,9 +211,13 @@ public abstract class BaseChargingDemo {
             }
 
             long startNs = System.currentTimeMillis();
-            collection.deleteOne(eq(i));
+            DeleteResult dl = collection.deleteOne(eq(i));
             shc.reportLatency(BaseChargingDemo.DELETE_DOC, startNs, "Delete time", 2000);
-            shc.incCounter(BaseChargingDemo.DELETE_DOC);
+            if (dl.getDeletedCount() == 1) {
+                shc.incCounter(BaseChargingDemo.DELETE_DOC);
+            } else {
+                shc.incCounter(BaseChargingDemo.DELETE_DOC_ERROR);
+            }
 
             if (i % 100000 == 1) {
                 msg("Deleted " + i + " users...");
@@ -227,16 +225,11 @@ public abstract class BaseChargingDemo {
 
         }
 
-        msg("All " + userCount + " entries in queue, waiting for it to drain...");
-
-        //mongoClient.wait();
-
         long entriesPerMS = userCount / (System.currentTimeMillis() - startMsUpsert);
         msg("Deleted " + entriesPerMS + " users per ms...");
         msg(shc.toString());
 
     }
-
 
     /**
      * Convenience method to query a user a general stats and log the results.
@@ -250,7 +243,6 @@ public abstract class BaseChargingDemo {
         // Query user #queryUserId...
         msg("Query user #" + queryUserId + "...");
         getUser(queryUserId, collection, BaseChargingDemo::reportDocument);
-
 
         msg("Show amount of credit currently reserved for products...");
         //TODO
@@ -329,7 +321,6 @@ public abstract class BaseChargingDemo {
         UserKVState[] userState = new UserKVState[userCount];
 
         Random r = new Random();
-
         Gson gson = new Gson();
 
         for (int i = 0; i < userCount; i++) {
@@ -350,6 +341,8 @@ public abstract class BaseChargingDemo {
         int fullUpdate = 0;
         int deltaUpdate = 0;
 
+        int firstSession = Integer.MIN_VALUE;
+
         while (endtimeMs > System.currentTimeMillis()) {
 
             if (tpThisMs++ > tpMs) {
@@ -368,8 +361,13 @@ public abstract class BaseChargingDemo {
             // Find session to do a transaction for...
             int oursession = r.nextInt(userCount);
 
+            if (firstSession == Integer.MIN_VALUE) {
+                firstSession = oursession;
+            }
+
             // See if session already has an active transaction and avoid
             // it if it does.
+
 
             if (userState[oursession].isTxInFlight()) {
 
@@ -382,7 +380,7 @@ public abstract class BaseChargingDemo {
 
                     userState[oursession].startTran();
                     userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                    GetAndLockUser(mainClient, userState[oursession], oursession);
+                    GetAndLockUser(mainClient, userState[oursession], oursession,gson);
                     lockCount++;
 
                 } else {
@@ -393,8 +391,7 @@ public abstract class BaseChargingDemo {
 
                 userState[oursession].startTran();
                 userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                GetAndLockUser(mainClient, userState[oursession], oursession);
-                // mainClient.callProcedure(userState[oursession], "GetAndLockUser", oursession);
+                GetAndLockUser(mainClient, userState[oursession], oursession, gson);
                 lockCount++;
 
             } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_LOCKED) {
@@ -410,30 +407,32 @@ public abstract class BaseChargingDemo {
                     // bandwidth
                     UpdateLockedUser(mainClient, userState[oursession],
                             userState[oursession].getLockId(), getNewLoyaltyCardNumber(r) + "",
-                            ExtraUserData.NEW_LOYALTY_NUMBER);
+                            ExtraUserData.NEW_LOYALTY_NUMBER,gson);
                 } else {
                     fullUpdate++;
                     UpdateLockedUser(mainClient, userState[oursession],
-                            userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null);
+                            userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null, gson);
                 }
 
             }
 
             tranCount++;
+            userState[oursession].endTran(); //TODO - Fix when we make async
 
             if (tranCount % 100000 == 1) {
                 msg("Transaction " + tranCount);
             }
 
+            // See if we need to do global queries...
+            if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
+                lastGlobalQueryMs = System.currentTimeMillis();
+
+                queryUserAndStats(mainClient, firstSession);
+
+            }
+
         }
 
-        // See if we need to do global queries...
-        if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
-            lastGlobalQueryMs = System.currentTimeMillis();
-
-            queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID);
-
-        }
 
         msg(tranCount + " transactions done...");
         msg("All entries in queue, waiting for it to drain...");
@@ -465,7 +464,7 @@ public abstract class BaseChargingDemo {
         return tps / (tpMs * 1000) > .9;
     }
 
-    private static void GetAndLockUser(MongoClient mongoClient, UserKVState userKVState, int sessionId) {
+    private static void GetAndLockUser(MongoClient mongoClient, UserKVState userKVState, int sessionId, Gson gson) {
 
         MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
@@ -483,8 +482,13 @@ public abstract class BaseChargingDemo {
                 if (userDoc != null) {
                     UserTable ut = new UserTable(userDoc);
                     ut.lock();
-                    Document update = new Document("userSoftlockExpiry", ut.userSoftlockExpiry).append("userSoftLockSessionId", ut.userSoftLockSessionId);
-                    collection.replaceOne(pk, update);
+                    Document update = userDoc.append("userSoftlockExpiry", ut.userSoftlockExpiry).append("userSoftLockSessionId", ut.userSoftLockSessionId);
+                    UpdateResult replaceResult = collection.replaceOne(pk, update);
+                    if (replaceResult.getModifiedCount() == 0) {
+                        msg("User not found");
+                    } else {
+                        userKVState.setLockId(ut.userSoftLockSessionId);
+                    }
                 }
 
                 return null; // Return value as expected by the lambda
@@ -498,7 +502,7 @@ public abstract class BaseChargingDemo {
 
     }
 
-    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId, String jsonPayload, String deltaOperationName) {
+    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId, String jsonPayload, String deltaOperationName, Gson gson) {
 
         MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
@@ -522,9 +526,12 @@ public abstract class BaseChargingDemo {
                     } else {
 
                         ut.unLock();
-                        Document update = new Document("userSoftlockExpiry", null).append("userSoftLockSessionId", Long.MIN_VALUE).append("jsonPayload", jsonPayload);
-                        collection.replaceOne(pk, update);
-                        userKVState.setLockId(Long.MIN_VALUE);
+                        Document update = userDoc.append("userSoftlockExpiry", null).append("userSoftLockSessionId", NO_SESSION).append("jsonPayload", jsonPayload);
+                        UpdateResult replaceResult = collection.replaceOne(pk, update);
+                        if (replaceResult.getModifiedCount() == 0) {
+                            msg("User not found");
+                        }
+                        userKVState.setLockId(NO_SESSION);
                     }
                 }
 
@@ -575,17 +582,23 @@ public abstract class BaseChargingDemo {
      *
      * Convenience method to clear outstaning locks between runs
      *
-     * @param mainClient
+     * @param mongoClient
      */
     protected static void unlockAllRecords(MongoClient mongoClient) {
 
         msg("Clearing locked sessions from prior runs...");
         MongoDatabase restaurantsDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
-        Document unlock = new Document("userSoftlockExpiry", null).append("userSoftLockSessionId", Long.MIN_VALUE);
+        BasicDBObject updateFields = new BasicDBObject();
+        updateFields.append("userSoftlockExpiry", NO_SESSION);
+        updateFields.append("userSoftLockSessionId", NO_SESSION);
+        BasicDBObject setQuery = new BasicDBObject();
+        setQuery.append("$set", updateFields);
 
         final long startMs = System.currentTimeMillis();
-        UpdateResult userDoc = collection.updateMany(gt("userSoftlockExpiry",Long.MIN_VALUE),unlock);
+        UpdateResult userDoc = collection.updateMany(gt("userSoftlockExpiry", NO_SESSION), setQuery);
+        msg("Unlocked " + userDoc.getModifiedCount() + " records");
+
         shc.reportLatency(BaseChargingDemo.CLEAR_LOCK, startMs, "Clear Locks", 10000);
 
         msg("...done");
@@ -613,7 +626,6 @@ public abstract class BaseChargingDemo {
         Gson g = new Gson();
         MongoDatabase database = mainClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
-
 
         // Used to track changes and be unique when we are running multiple threads
         final long pid = getPid();
@@ -675,7 +687,7 @@ public abstract class BaseChargingDemo {
 
 
                     final long startMs = System.currentTimeMillis();
-                    addCredit(mainClient, randomuser, extraCredit);
+                    addCredit(mainClient, randomuser, extraCredit,g);
                     shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);
                     shc.incCounter(BaseChargingDemo.ADD_CREDIT);
                     users[randomuser].endTran();
@@ -683,7 +695,6 @@ public abstract class BaseChargingDemo {
                 } else {
 
                     reportUsageCount++;
-
 
                     int unitsUsed = (int) (users[randomuser].currentlyReserved * 0.9);
                     int unitsWanted = r.nextInt(100);
@@ -734,7 +745,7 @@ public abstract class BaseChargingDemo {
     }
 
 
-    private static void addCredit(MongoClient mongoClient, int randomuser, long extraCredit) {
+    private static void addCredit(MongoClient mongoClient, int randomuser, long extraCredit, Gson g) {
 
         MongoDatabase restaurantsDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
@@ -743,13 +754,12 @@ public abstract class BaseChargingDemo {
                 .writeConcern(WriteConcern.MAJORITY)
                 .build();
 
-
         try (ClientSession session = mongoClient.startSession()) {
             // Uses withTransaction and lambda for transaction operations
             session.withTransaction(() -> {
                 Document userDoc = collection.find(eq(randomuser)).first();
                 if (userDoc != null) {
-                    collection.replaceOne(eq(randomuser), addRandomCredit(userDoc));
+                    collection.replaceOne(eq(randomuser), addRandomCredit(userDoc,g));
                 }
 
                 return null; // Return value as expected by the lambda
@@ -763,17 +773,15 @@ public abstract class BaseChargingDemo {
     }
 
 
-    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId, Gson g) {
+    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId, Gson gson) {
 
         MongoDatabase restaurantsDatabase = mainClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
-
 
         // Sets transaction options
         TransactionOptions txnOptions = TransactionOptions.builder()
                 .writeConcern(WriteConcern.MAJORITY)
                 .build();
-
 
         try (ClientSession session = mainClient.startSession()) {
             // Uses withTransaction and lambda for transaction operations
@@ -782,7 +790,7 @@ public abstract class BaseChargingDemo {
                 if (document != null) {
                     UserTable theUserTable = new UserTable(document);
                     theUserTable.reportQuotaUsage(unitsUsed, unitsWanted, sessionId, txnId);
-                    String jsonObject = g.toJson(theUserTable, UserTable.class);
+                    String jsonObject = gson.toJson(theUserTable, UserTable.class);
 
                     collection.replaceOne(eq(randomuser), Document.parse(jsonObject));
                 }
@@ -798,8 +806,7 @@ public abstract class BaseChargingDemo {
     }
 
 
-    public static Document addRandomCredit(Document document) {
-        Gson g = new Gson();
+    public static Document addRandomCredit(Document document, Gson g ) {
         Random r = new Random();
 
         UserTable theUserTable = new UserTable(document);

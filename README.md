@@ -1,13 +1,18 @@
 # mongodb-charglt
 Mongo implementation of Charglt
 
-TODO:
+* Has the  basic functionality of charglt, but is missing stuff  - see TODO
+## TODO
  
-* make extrajson payload mongo centric
-* feed to downstream systems
-* unlock and reset records
-* running totals
-* weird variable names
-* make scale
+* Make extrajson payload mongo centric
+* Feed to downstream systems
+* Unlock and reset records partially working
+* Running totals not working
+* Rename weird variable names
+* make scale - currently is sync and one thread
+
+## Status
+
+While this is fine to play with, it's not a fair representation of MongoDB at the moment.
 
 
