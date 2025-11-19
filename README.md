@@ -8,8 +8,7 @@ Mongo implementation of Charglt
 * Feed to downstream systems
 * Unlock and reset records partially working
 * Running totals not working
-* Rename weird variable names
-* make scale - currently is sync and one thread
+* Make scale - currently is sync and one thread
 
 ## Status
 

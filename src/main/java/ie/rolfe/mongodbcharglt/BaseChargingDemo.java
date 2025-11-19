@@ -29,7 +29,6 @@ import org.bson.conversions.Bson;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
 
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.Random;
 
@@ -42,7 +41,6 @@ import static com.mongodb.client.model.Filters.gt;
 public abstract class BaseChargingDemo {
 
     public static final long GENERIC_QUERY_USER_ID = 42;
-    public static final int HISTOGRAM_SIZE_MS = 1000000;
     public static final long NO_SESSION = Long.MIN_VALUE;
 
     public static final String REPORT_QUOTA_USAGE = "ReportQuotaUsage";
@@ -85,7 +83,6 @@ public abstract class BaseChargingDemo {
      */
     @SuppressWarnings("deprecation")
     protected static MongoClient connectMongoDB(String connectionString) throws Exception {
-
 
         String uri = "mongodb://" + connectionString + ":" + MONGO_DEFAULT_PORT + "/";
         MongoClient mongoClient = null;
@@ -152,8 +149,8 @@ public abstract class BaseChargingDemo {
             }
 
             UserTable newUser = UserTable.getUserTable(ourJson, r.nextInt(initialCredit), i, startMsUpsert);
-            newUser.addCredit(100, "Txn1");
-            newUser.reportQuotaUsage(100, 10, 100, "TX2");
+            newUser.addCredit(100, "Txn_" + i);
+            newUser.reportQuotaUsage(100, 10, 100, "TX2_"+i);
             String jsonObject = g.toJson(newUser, UserTable.class);
 
             Document document2 = Document.parse(jsonObject);
@@ -232,9 +229,7 @@ public abstract class BaseChargingDemo {
     }
 
     /**
-     * Convenience method to query a user a general stats and log the results.
-     *
-     *
+     * Convenience method to query a user a general stats and log the results
      */
     protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId) {
         MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
@@ -367,8 +362,6 @@ public abstract class BaseChargingDemo {
 
             // See if session already has an active transaction and avoid
             // it if it does.
-
-
             if (userState[oursession].isTxInFlight()) {
 
                 inFlightCount++;
@@ -436,7 +429,6 @@ public abstract class BaseChargingDemo {
 
         msg(tranCount + " transactions done...");
         msg("All entries in queue, waiting for it to drain...");
-        //mainClient.drain();
         msg("Queue drained...");
 
         long transactionsPerMs = tranCount / (System.currentTimeMillis() - startMsRun);
@@ -544,7 +536,6 @@ public abstract class BaseChargingDemo {
 
 
     }
-
 
     /**
      * Used when we need to really slow down below 1 tx per ms..
@@ -684,8 +675,7 @@ public abstract class BaseChargingDemo {
                     addCreditCount++;
 
                     final long extraCredit = r.nextInt(1000) + 1000;
-
-
+                    
                     final long startMs = System.currentTimeMillis();
                     addCredit(mainClient, randomuser, extraCredit,g);
                     shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);
