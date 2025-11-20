@@ -293,30 +293,6 @@ public abstract class BaseChargingDemo {
         }
     }
 
-//TODO
-//    /**
-//     *
-//     * Convenience method to query all users who have a specific loyalty card id
-//     *
-//     * @param mainClient
-//     * @param cardId
-//     * @throws IOException
-//     * @throws NoConnectionsException
-//     * @throws ProcCallException
-//     */
-//    protected static void queryLoyaltyCard(Client mainClient, long cardId)
-//            throws IOException, NoConnectionsException, ProcCallException {
-//
-//        // Query user #queryUserId...
-//        msg("Query card #" + cardId + "...");
-//        ClientResponse userResponse = mainClient.callProcedure("FindByLoyaltyCard", cardId);
-//
-//        for (int i = 0; i < userResponse.getResults().length; i++) {
-//            msg(System.lineSeparator() + userResponse.getResults()[i].toFormattedString());
-//        }
-//
-//    }
-//
 
     /**
      *
