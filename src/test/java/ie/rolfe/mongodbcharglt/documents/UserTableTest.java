@@ -32,8 +32,8 @@ class UserTableTest {
 
     public UserTable getBasicTable() {
         Gson g = new Gson();
-        Random r=new Random();
-        ExtraUserData eud = getExtraUserDataAsObject(100,  g,  r);
+        Random r = new Random();
+        ExtraUserData eud = getExtraUserDataAsObject(100, g, r);
         UserTable ut = UserTable.getUserTable(eud, INITIAL_CREDIT, USER_ID, INITIAL_DATE.getTime());
 
         UserUsageTable uu = new UserUsageTable(USER_ID, INITIAL_ALLOCATED, SESSION_ID, INITIAL_DATE);
@@ -46,8 +46,8 @@ class UserTableTest {
     void getUserTable() {
 
         Gson g = new Gson();
-        Random r=new Random();
-        ExtraUserData eud = getExtraUserDataAsObject(100,  g,  r);
+        Random r = new Random();
+        ExtraUserData eud = getExtraUserDataAsObject(100, g, r);
         UserTable ut = UserTable.getUserTable(eud, INITIAL_CREDIT, USER_ID, INITIAL_DATE.getTime());
 
         assertEquals(ut.getAvailableCredit(), INITIAL_CREDIT);

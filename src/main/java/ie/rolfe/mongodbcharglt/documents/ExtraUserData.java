@@ -40,14 +40,15 @@ public class ExtraUserData extends AbstractBaseTable {
 
     public ExtraUserData(Document userDataObjectDoc) {
 
-        mysteriousHexPayload =  userDataObjectDoc.getString("mysteriousHexPayload");
+        mysteriousHexPayload = userDataObjectDoc.getString("mysteriousHexPayload");
         loyaltySchemeName = userDataObjectDoc.getString("loyaltySchemeName");
         loyaltySchemeNumber = getLong(userDataObjectDoc, "loyaltySchemeNumber");
 
 
     }
 
-    public ExtraUserData() {}
+    public ExtraUserData() {
+    }
 
     @Override
     public String toString() {

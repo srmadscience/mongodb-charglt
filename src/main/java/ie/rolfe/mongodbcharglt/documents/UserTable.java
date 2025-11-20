@@ -14,8 +14,6 @@ import org.bson.Document;
 import java.security.SecureRandom;
 import java.util.*;
 
-import static ie.rolfe.mongodbcharglt.BaseChargingDemo.getExtraUserDataAsObject;
-
 /**
  * CREATE table user_table
  * (userid bigint not null primary key
@@ -72,7 +70,7 @@ public class UserTable extends AbstractBaseTable {
             userLastSeen = getDate(document, "userLastSeen");
             userSoftlockExpiry = getDate(document, "userSoftlockExpiry");
             userSoftLockSessionId = getLong(document, "userSoftLockSessionId");
-            balance  = getLong(document, "balance");
+            balance = getLong(document, "balance");
 
             Document urtDoc = (Document) document.get("userRecentTransactions");
 

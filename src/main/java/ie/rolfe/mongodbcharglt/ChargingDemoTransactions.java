@@ -56,7 +56,7 @@ public class ChargingDemoTransactions extends BaseChargingDemo {
             MongoClient mainClient = connectMongoDB(hostlist);
             MongoClient otherClient = connectMongoDB(hostlist);
 
-            clearUnfinishedTransactions(mainClient,userCount,new Gson());
+            clearUnfinishedTransactions(mainClient, userCount, new Gson());
 
             boolean ok = runTransactionBenchmark(userCount, tpMs, durationSeconds, globalQueryFreqSeconds, mainClient, otherClient, extraMs);
 
