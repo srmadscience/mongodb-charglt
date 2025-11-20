@@ -42,6 +42,7 @@ public abstract class BaseChargingDemo {
 
     public static final long GENERIC_QUERY_USER_ID = 42;
     public static final long NO_SESSION = Long.MIN_VALUE;
+    public static final Date NO_EXPIRY = new Date(0);
 
     public static final String REPORT_QUOTA_USAGE = "ReportQuotaUsage";
     public static final String KV_PUT = "KV_PUT";
@@ -57,6 +58,7 @@ public abstract class BaseChargingDemo {
     private static final String CHARGLT_USERS = "CHARGLT_USERS";
     private static final String ADD_CREDIT = "ADD_CREDIT";
     private static final String CLEAR_LOCK = "CLEAR_LOCK";
+    private static final String CLEAR_UNFINISHED = "CLEAR_UNFINISHED";
     public static SafeHistogramCache shc = SafeHistogramCache.getInstance();
 
     /**
@@ -558,20 +560,51 @@ public abstract class BaseChargingDemo {
      * credit.
      *
      */
-    protected static void clearUnfinishedTransactions(MongoClient mainClient)
+    protected static void clearUnfinishedTransactions(MongoClient mongoClient, int usercount, Gson g)
             throws Exception {
 
-        msg("Clearing unfinished transactions from prior runs...");
+        MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
+        MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
+        // Sets transaction options
+        TransactionOptions txnOptions = TransactionOptions.builder()
+                .writeConcern(WriteConcern.MAJORITY)
+                .build();
 
-        //TODO
-        //mainClient.callProcedure("@AdHoc", "DELETE FROM user_usage_table;");
+
+        for (int id = 0; id < usercount; id++) {
+            Bson pk = eq(id);
+            final long startMs = System.currentTimeMillis();
+            try (ClientSession session = mongoClient.startSession()) {
+                // Uses withTransaction and lambda for transaction operations
+                session.withTransaction(() -> {
+                    Document userDoc = collection.find(pk).first();
+                    if (userDoc != null) {
+                        UserTable ut = new UserTable(userDoc);
+                        ut.clearSessions();
+                        Document update = userDoc.append("userUsage", ut.userUsage);
+                        UpdateResult replaceResult = collection.replaceOne(pk, update);
+                        if (replaceResult.getModifiedCount() == 0) {
+                            msg("User " + pk.toString() + " not found on update");
+                        }
+                    } else {
+                        msg("User " + pk.toString()  + " not found on query");
+                    }
+
+                    return null; // Return value as expected by the lambda
+                }, txnOptions);
+
+                shc.reportLatency(BaseChargingDemo.CLEAR_UNFINISHED, startMs, "clear unfinished", 2000);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
         msg("...done");
 
     }
 
     /**
      *
-     * Convenience method to clear outstaning locks between runs
+     * Convenience method to clear outstanding locks between runs
      *
      * @param mongoClient
      */
@@ -581,13 +614,13 @@ public abstract class BaseChargingDemo {
         MongoDatabase chargingDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = chargingDatabase.getCollection(CHARGLT_USERS);
         BasicDBObject updateFields = new BasicDBObject();
-        updateFields.append("userSoftlockExpiry", NO_SESSION);
+        updateFields.append("userSoftlockExpiry", NO_EXPIRY);
         updateFields.append("userSoftLockSessionId", NO_SESSION);
         BasicDBObject setQuery = new BasicDBObject();
         setQuery.append("$set", updateFields);
 
         final long startMs = System.currentTimeMillis();
-        UpdateResult userDoc = collection.updateMany(gt("userSoftlockExpiry", NO_SESSION), setQuery);
+        UpdateResult userDoc = collection.updateMany(gt("userSoftLockSessionId", NO_SESSION), setQuery);
         msg("Unlocked " + userDoc.getModifiedCount() + " records");
 
         shc.reportLatency(BaseChargingDemo.CLEAR_LOCK, startMs, "Clear Locks", 10000);
@@ -675,7 +708,7 @@ public abstract class BaseChargingDemo {
                     addCreditCount++;
 
                     final long extraCredit = r.nextInt(1000) + 1000;
-                    
+
                     final long startMs = System.currentTimeMillis();
                     addCredit(mainClient, randomuser, extraCredit,g);
                     shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);

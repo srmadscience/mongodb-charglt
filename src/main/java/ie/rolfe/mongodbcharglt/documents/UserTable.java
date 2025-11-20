@@ -340,4 +340,9 @@ public class UserTable extends AbstractBaseTable {
 
         return userSoftLockSessionId != lockId;
     }
+
+    public void clearSessions() {
+
+        userUsage.clear();
+    }
 }
