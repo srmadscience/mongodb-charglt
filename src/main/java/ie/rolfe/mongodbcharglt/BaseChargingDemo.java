@@ -28,19 +28,9 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
-import com.mongodb.ExplainVerbosity;
-import com.mongodb.client.model.Accumulators;
-import com.mongodb.client.model.Aggregates;
-import com.mongodb.client.model.Filters;
-import com.mongodb.client.model.Projections;
 import org.bson.Document;
-import org.bson.json.JsonWriterSettings;
-
-import java.util.Arrays;
-import java.util.List;
 
 import ie.rolfe.mongodbcharglt.documents.UserTable;
-import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
 
@@ -697,11 +687,11 @@ long total = 0;
 
         UserTransactionState[] users = new UserTransactionState[userCount];
 
-        msg("Creating client records for " + users.length + " users");
+        msg("Creating internal client records for " + users.length + " users");
         for (int i = 0; i < users.length; i++) {
             // We don't know a users credit till we've spoken to the server, so
             // we make an optimistic assumption...
-            users[i] = new UserTransactionState(i, 1000);
+            users[i] = new UserTransactionState(i, 2000);
         }
 
         final long startMsRun = System.currentTimeMillis();
@@ -753,6 +743,8 @@ long total = 0;
                     shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);
                     shc.incCounter(BaseChargingDemo.ADD_CREDIT);
                     users[randomuser].endTran();
+                    users[randomuser].spendableBalance += extraCredit;
+
 
                 } else {
 
@@ -763,7 +755,7 @@ long total = 0;
                     final long startMs = System.currentTimeMillis();
                     reportQuotaUsage(mainClient, randomuser, unitsUsed,
                             unitsWanted, users[randomuser].sessionId,
-                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(), g);
+                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(), g,users[randomuser]);
                     shc.reportLatency(BaseChargingDemo.REPORT_QUOTA_USAGE, startMs, "REPORT_QUOTA_USAGE", 2000);
                     shc.incCounter(BaseChargingDemo.REPORT_QUOTA_USAGE);
                     users[randomuser].endTran();
@@ -821,7 +813,7 @@ long total = 0;
             session.withTransaction(() -> {
                 Document userDoc = collection.find(eq(randomuser)).first();
                 if (userDoc != null) {
-                    collection.replaceOne(eq(randomuser), addRandomCredit(userDoc,g));
+                    collection.replaceOne(eq(randomuser), addCredit(userDoc,g,extraCredit));
                 }
 
                 return null; // Return value as expected by the lambda
@@ -835,7 +827,7 @@ long total = 0;
     }
 
 
-    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId, Gson gson) {
+    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId, Gson gson, UserTransactionState userTS) {
 
         MongoDatabase restaurantsDatabase = mainClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
@@ -853,9 +845,11 @@ long total = 0;
                     UserTable theUserTable = new UserTable(document);
                     theUserTable.reportQuotaUsage(unitsUsed, unitsWanted, sessionId, txnId);
                     String jsonObject = gson.toJson(theUserTable, UserTable.class);
+                    userTS.spendableBalance = theUserTable.getAvailableCredit();
 
                     collection.replaceOne(eq(randomuser), Document.parse(jsonObject));
-                }
+
+                 }
 
                 return null; // Return value as expected by the lambda
             }, txnOptions);
@@ -868,11 +862,10 @@ long total = 0;
     }
 
 
-    public static Document addRandomCredit(Document document, Gson g ) {
-        Random r = new Random();
+    public static Document addCredit(Document document, Gson g, long amount ) {
 
         UserTable theUserTable = new UserTable(document);
-        int amount = r.nextInt(1000);
+
         theUserTable.addCredit(amount, "AddCredit_" + amount + "_" + System.currentTimeMillis());
         String jsonObject = g.toJson(theUserTable, UserTable.class);
         return (Document.parse(jsonObject));

@@ -67,6 +67,7 @@ public class UserTable extends AbstractBaseTable {
             userLastSeen = getDate(document, "userLastSeen");
             userSoftlockExpiry = getDate(document, "userSoftlockExpiry");
             userSoftLockSessionId = getLong(document, "userSoftLockSessionId");
+            balance  = getLong(document, "balance");
 
             Document urtDoc = (Document) document.get("userRecentTransactions");
 
