@@ -8,6 +8,7 @@ Mongo implementation of Charglt
 * Feed to downstream systems
 * Need to make add credit on shortfall
 * Make scale - currently is sync and one thread
+* Running totals do a doc-by-doc scan instead of a single call.
 
 ## Status
 
