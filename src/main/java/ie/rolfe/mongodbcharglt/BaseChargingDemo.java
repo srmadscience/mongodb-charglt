@@ -23,6 +23,22 @@ import com.mongodb.WriteConcern;
 import com.mongodb.client.*;
 import com.mongodb.client.result.DeleteResult;
 import com.mongodb.client.result.UpdateResult;
+
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.ExplainVerbosity;
+import com.mongodb.client.model.Accumulators;
+import com.mongodb.client.model.Aggregates;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Projections;
+import org.bson.Document;
+import org.bson.json.JsonWriterSettings;
+
+import java.util.Arrays;
+import java.util.List;
+
 import ie.rolfe.mongodbcharglt.documents.UserTable;
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -59,6 +75,7 @@ public abstract class BaseChargingDemo {
     private static final String ADD_CREDIT = "ADD_CREDIT";
     private static final String CLEAR_LOCK = "CLEAR_LOCK";
     private static final String CLEAR_UNFINISHED = "CLEAR_UNFINISHED";
+    private static final String COUNT_USAGE_TOTAL_BY_DOC = "COUNT_USAGE_TOTAL_BY_DOC";
     public static SafeHistogramCache shc = SafeHistogramCache.getInstance();
 
     /**
@@ -168,7 +185,7 @@ public abstract class BaseChargingDemo {
                     msg("Errors detected. Halting...");
                     break;
                 } else {
-                    queryUserAndStats(mongoClient, i);
+                    queryUserAndStats(mongoClient, i,userCount);
                 }
 
             }
@@ -233,7 +250,7 @@ public abstract class BaseChargingDemo {
     /**
      * Convenience method to query a user a general stats and log the results
      */
-    protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId) {
+    protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId,int userCount) {
         MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
 
@@ -242,15 +259,37 @@ public abstract class BaseChargingDemo {
         getUser(queryUserId, collection, BaseChargingDemo::reportDocument);
 
         msg("Show amount of credit currently reserved for products...");
-        //TODO
-//        ClientResponse allocResponse = mongoClient.callProcedure("ShowCurrentAllocations__promBL");
-//
-//        for (int i = 0; i < allocResponse.getResults().length; i++) {
-//            msg(System.lineSeparator() + allocResponse.getResults()[i].toFormattedString());
-//        }
+        getCurrentReservedCredit(collection,userCount);
+
     }
 
+    private static void getCurrentReservedCredit(MongoCollection<Document> collection,  int userCount) {
 
+        final long getDocByDocMs = System.currentTimeMillis();
+
+        SafeHistogramCache shc = SafeHistogramCache.getInstance();
+         Random r = new Random();
+        Gson g = new Gson();
+long total = 0;
+
+        for (int i = 0; i < userCount; i++) {
+
+            Document userDoc = collection.find(eq(i)).first();
+            UserTable ut = new UserTable(userDoc);
+            total += ut.getUsageBalance();
+
+            if (i % 100000 == 1) {
+                msg("Queried " + i + " users. Total is " + total);
+
+            }
+
+        }
+
+
+        msg("Total for " + userCount + " users is " + total);
+
+        shc.reportLatency(BaseChargingDemo.COUNT_USAGE_TOTAL_BY_DOC, getDocByDocMs, "Time to count usage", 10000);
+}
     private static void getUser(long queryUserId, MongoCollection<Document> collection, java.util.function.Consumer<Document> nextStep) {
         Document userDoc = collection.find(eq(queryUserId)).first();
 
@@ -268,7 +307,7 @@ public abstract class BaseChargingDemo {
         }
     }
 
-
+//TODO
 //    /**
 //     *
 //     * Convenience method to query all users who have a specific loyalty card id
@@ -422,7 +461,7 @@ public abstract class BaseChargingDemo {
             if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
                 lastGlobalQueryMs = System.currentTimeMillis();
 
-                queryUserAndStats(mainClient, firstSession);
+                queryUserAndStats(mainClient, firstSession,userCount);
 
             }
 
@@ -570,7 +609,7 @@ public abstract class BaseChargingDemo {
                 .writeConcern(WriteConcern.MAJORITY)
                 .build();
 
-
+        msg("clearUnfinishedTransactions...");
         for (int id = 0; id < usercount; id++) {
             Bson pk = eq(id);
             final long startMs = System.currentTimeMillis();
@@ -740,7 +779,7 @@ public abstract class BaseChargingDemo {
             if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
                 lastGlobalQueryMs = System.currentTimeMillis();
 
-                queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID);
+                queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID,userCount);
 
             }
 

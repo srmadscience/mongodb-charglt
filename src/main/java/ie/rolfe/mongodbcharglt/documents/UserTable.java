@@ -345,4 +345,15 @@ public class UserTable extends AbstractBaseTable {
 
         userUsage.clear();
     }
+
+    public long getUsageBalance() {
+
+        long total = 0;
+        if (userUsage != null) {
+            for (Map.Entry<Long, UserUsageTable> entry : userUsage.entrySet()) {
+                total += entry.getValue().allocatedAmount;
+            }
+        }
+        return total;
+    }
 }
