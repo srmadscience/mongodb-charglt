@@ -6,7 +6,6 @@ Mongo implementation of Charglt
  
 * Make extrajson payload mongo centric
 * Feed to downstream systems
-* Need to make add credit on shortfall
 * Make scale - currently is sync and one thread
 * Running totals do a doc-by-doc scan instead of a single call.
 

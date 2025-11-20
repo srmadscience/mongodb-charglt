@@ -613,10 +613,10 @@ long total = 0;
                         Document update = userDoc.append("userUsage", ut.userUsage);
                         UpdateResult replaceResult = collection.replaceOne(pk, update);
                         if (replaceResult.getModifiedCount() == 0) {
-                            msg("User " + pk.toString() + " not found on update");
+                            msg("User " + pk + " not found on update");
                         }
                     } else {
-                        msg("User " + pk.toString()  + " not found on query");
+                        msg("User " + pk + " not found on query");
                     }
 
                     return null; // Return value as expected by the lambda
