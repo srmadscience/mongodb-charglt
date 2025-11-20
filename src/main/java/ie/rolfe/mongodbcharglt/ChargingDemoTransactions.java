@@ -15,7 +15,6 @@
 
 package ie.rolfe.mongodbcharglt;
 
-
 import com.google.gson.Gson;
 import com.mongodb.client.MongoClient;
 

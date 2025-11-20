@@ -18,6 +18,7 @@ package ie.rolfe.mongodbcharglt;
 
 import com.google.gson.Gson;
 import com.mongodb.client.MongoClient;
+import ie.rolfe.mongodbcharglt.documents.ExtraUserData;
 
 import java.util.Arrays;
 import java.util.Random;
@@ -50,7 +51,7 @@ public class CreateChargingDemoData extends BaseChargingDemo {
 
         // How long our arbitrary JSON payload will be.
         int loblength = 120;
-        final String ourJson = getExtraUserDataAsJsonString(loblength, gson, r);
+        final ExtraUserData ourJson = getExtraUserDataAsObject(loblength, gson, r);
 
         // Default credit users are 'born' with
         int initialCredit = Integer.parseInt(args[3]);

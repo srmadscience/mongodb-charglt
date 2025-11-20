@@ -4,10 +4,9 @@ Mongo implementation of Charglt
 * Has the  basic functionality of charglt, but is missing stuff  - see TODO
 ## TODO
  
-* Make extrajson payload mongo centric
 * Feed to downstream systems
 * Make scale - currently is sync and one thread
-* Running totals do a doc-by-doc scan instead of a single call.
+* Running totals currently do a doc-by-doc scan instead of a single call.
 
 ## Status
 

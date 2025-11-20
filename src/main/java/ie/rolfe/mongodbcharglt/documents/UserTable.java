@@ -14,6 +14,8 @@ import org.bson.Document;
 import java.security.SecureRandom;
 import java.util.*;
 
+import static ie.rolfe.mongodbcharglt.BaseChargingDemo.getExtraUserDataAsObject;
+
 /**
  * CREATE table user_table
  * (userid bigint not null primary key
@@ -35,7 +37,7 @@ public class UserTable extends AbstractBaseTable {
     public long _id;
 
     public long userId;
-    public String userJsonObject;
+    public ExtraUserData userDataObject;
     public Date userLastSeen;
     public long userSoftLockSessionId = Long.MIN_VALUE;
     public Date userSoftlockExpiry;
@@ -45,10 +47,10 @@ public class UserTable extends AbstractBaseTable {
 
     public long balance = 0;
 
-    public UserTable(long userId, String userJsonObject, Date userLastSeen, Date userSoftlockExpiry, long userSoftLockSessionId) {
+    public UserTable(long userId, ExtraUserData userJsonObject, Date userLastSeen, Date userSoftlockExpiry, long userSoftLockSessionId) {
         this.userId = userId;
         _id = userId;
-        this.userJsonObject = userJsonObject;
+        this.userDataObject = userJsonObject;
         this.userLastSeen = userLastSeen;
         this.userSoftlockExpiry = userSoftlockExpiry;
         this.userSoftLockSessionId = userSoftLockSessionId;
@@ -63,7 +65,10 @@ public class UserTable extends AbstractBaseTable {
         if (document != null) {
             _id = getLong(document, "_id");
             userId = getLong(document, "userId");
-            userJsonObject = document.getString("userJsonObject");
+
+            Document userDataObjectDoc = (Document) document.get("userDataObject");
+            userDataObject = new ExtraUserData(userDataObjectDoc);
+
             userLastSeen = getDate(document, "userLastSeen");
             userSoftlockExpiry = getDate(document, "userSoftlockExpiry");
             userSoftLockSessionId = getLong(document, "userSoftLockSessionId");
@@ -96,13 +101,13 @@ public class UserTable extends AbstractBaseTable {
 
     }
 
-    public static UserTable getUserTable(String ourJson, long initialCredit, long id, long startMsUpsert) {
+    public static UserTable getUserTable(ExtraUserData eud, long initialCredit, long id, long startMsUpsert) {
         String txnId = "Create_" + id;
         final long approvedAmount = 0;
         String purpose = "Created";
         Date createDate = new Date(startMsUpsert);
 
-        UserTable newUser = new UserTable(id, ourJson, createDate, null, Long.MIN_VALUE);
+        UserTable newUser = new UserTable(id, eud, createDate, null, Long.MIN_VALUE);
 
         UserRecentTransactions urt = new UserRecentTransactions(id, txnId, createDate, Long.MIN_VALUE, approvedAmount, initialCredit, purpose);
         newUser.addUserRecentTransaction(urt);
@@ -160,7 +165,7 @@ public class UserTable extends AbstractBaseTable {
         return "UserTable{" +
                 "_id=" + _id +
                 ", userId=" + userId +
-                ", userJsonObject='" + userJsonObject + '\'' +
+                ", userDataObject='" + userDataObject.toString() + '\'' +
                 ", userLastSeen=" + userLastSeen +
                 ", userSoftlockExpiry=" + userSoftlockExpiry +
                 ", userUsage=" + userUsage +

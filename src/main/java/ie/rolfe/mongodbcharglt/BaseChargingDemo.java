@@ -23,14 +23,9 @@ import com.mongodb.WriteConcern;
 import com.mongodb.client.*;
 import com.mongodb.client.result.DeleteResult;
 import com.mongodb.client.result.UpdateResult;
-
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
-import org.bson.Document;
-
+import ie.rolfe.mongodbcharglt.documents.ExtraUserData;
 import ie.rolfe.mongodbcharglt.documents.UserTable;
+import org.bson.Document;
 import org.bson.conversions.Bson;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
 
@@ -112,7 +107,7 @@ public abstract class BaseChargingDemo {
      * @param length
      * @return
      */
-    protected static String getExtraUserDataAsJsonString(int length, Gson gson, Random r) {
+    public static ExtraUserData getExtraUserDataAsObject(int length, Gson gson, Random r) {
 
         ExtraUserData eud = new ExtraUserData();
 
@@ -127,11 +122,11 @@ public abstract class BaseChargingDemo {
 
         eud.mysteriousHexPayload = ourText.toString();
 
-        return gson.toJson(eud);
+        return eud;
     }
 
 
-    protected static void upsertAllUsers(int userCount, int tpMs, String ourJson, int initialCredit, MongoClient mongoClient, MongoClient otherClient)
+    protected static void upsertAllUsers(int userCount, int tpMs, ExtraUserData ourEud, int initialCredit, MongoClient mongoClient, MongoClient otherClient)
             throws InterruptedException {
 
         final long startMsUpsert = System.currentTimeMillis();
@@ -157,9 +152,9 @@ public abstract class BaseChargingDemo {
                 tpThisMs = 0;
             }
 
-            UserTable newUser = UserTable.getUserTable(ourJson, r.nextInt(initialCredit), i, startMsUpsert);
+            UserTable newUser = UserTable.getUserTable(ourEud, r.nextInt(initialCredit), i, startMsUpsert);
             newUser.addCredit(100, "Txn_" + i);
-            newUser.reportQuotaUsage(100, 10, 100, "TX2_"+i);
+            newUser.reportQuotaUsage(100, 10, 100, "TX2_" + i);
             String jsonObject = g.toJson(newUser, UserTable.class);
 
             Document document2 = Document.parse(jsonObject);
@@ -175,7 +170,7 @@ public abstract class BaseChargingDemo {
                     msg("Errors detected. Halting...");
                     break;
                 } else {
-                    queryUserAndStats(mongoClient, i,userCount);
+                    queryUserAndStats(mongoClient, i, userCount);
                 }
 
             }
@@ -240,7 +235,7 @@ public abstract class BaseChargingDemo {
     /**
      * Convenience method to query a user a general stats and log the results
      */
-    protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId,int userCount) {
+    protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId, int userCount) {
         MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
 
@@ -249,18 +244,18 @@ public abstract class BaseChargingDemo {
         getUser(queryUserId, collection, BaseChargingDemo::reportDocument);
 
         msg("Show amount of credit currently reserved for products...");
-        getCurrentReservedCredit(collection,userCount);
+        getCurrentReservedCredit(collection, userCount);
 
     }
 
-    private static void getCurrentReservedCredit(MongoCollection<Document> collection,  int userCount) {
+    private static void getCurrentReservedCredit(MongoCollection<Document> collection, int userCount) {
 
         final long getDocByDocMs = System.currentTimeMillis();
 
         SafeHistogramCache shc = SafeHistogramCache.getInstance();
-         Random r = new Random();
+        Random r = new Random();
         Gson g = new Gson();
-long total = 0;
+        long total = 0;
 
         for (int i = 0; i < userCount; i++) {
 
@@ -279,7 +274,8 @@ long total = 0;
         msg("Total for " + userCount + " users is " + total);
 
         shc.reportLatency(BaseChargingDemo.COUNT_USAGE_TOTAL_BY_DOC, getDocByDocMs, "Time to count usage", 10000);
-}
+    }
+
     private static void getUser(long queryUserId, MongoCollection<Document> collection, java.util.function.Consumer<Document> nextStep) {
         Document userDoc = collection.find(eq(queryUserId)).first();
 
@@ -404,7 +400,7 @@ long total = 0;
 
                     userState[oursession].startTran();
                     userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                    GetAndLockUser(mainClient, userState[oursession], oursession,gson);
+                    GetAndLockUser(mainClient, userState[oursession], oursession, gson);
                     lockCount++;
 
                 } else {
@@ -431,11 +427,11 @@ long total = 0;
                     // bandwidth
                     UpdateLockedUser(mainClient, userState[oursession],
                             userState[oursession].getLockId(), getNewLoyaltyCardNumber(r) + "",
-                            ExtraUserData.NEW_LOYALTY_NUMBER,gson);
+                            ExtraUserData.NEW_LOYALTY_NUMBER, gson);
                 } else {
                     fullUpdate++;
                     UpdateLockedUser(mainClient, userState[oursession],
-                            userState[oursession].getLockId(), getExtraUserDataAsJsonString(jsonsize, gson, r), null, gson);
+                            userState[oursession].getLockId(), getExtraUserDataAsObject(jsonsize, gson, r), null, gson);
                 }
 
             }
@@ -451,7 +447,7 @@ long total = 0;
             if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
                 lastGlobalQueryMs = System.currentTimeMillis();
 
-                queryUserAndStats(mainClient, firstSession,userCount);
+                queryUserAndStats(mainClient, firstSession, userCount);
 
             }
 
@@ -525,7 +521,7 @@ long total = 0;
 
     }
 
-    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId, String jsonPayload, String deltaOperationName, Gson gson) {
+    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId, Object extraPayload, String deltaOperationName, Gson gson) {
 
         MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
         MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
@@ -548,8 +544,18 @@ long total = 0;
                         msg(userKVState.id + ": locked by session " + ut.userId + " until " + ut.userSoftlockExpiry);
                     } else {
 
-                        ut.unLock();
-                        Document update = userDoc.append("userSoftlockExpiry", null).append("userSoftLockSessionId", NO_SESSION).append("jsonPayload", jsonPayload);
+                        ut.unLock();//
+                        Document update;
+
+                        if (extraPayload instanceof String) {
+                            ut.userDataObject.loyaltySchemeNumber = Long.parseLong((String) extraPayload);
+                            Document utDoc = Document.parse(gson.toJson(ut.userDataObject));
+                            update = userDoc.append("userSoftlockExpiry", null).append("userSoftLockSessionId", NO_SESSION).append("userDataObject", utDoc);
+                        } else {
+                            Document utDoc = Document.parse(gson.toJson(extraPayload));
+                            update = userDoc.append("userSoftlockExpiry", null).append("userSoftLockSessionId", NO_SESSION).append("userDataObject", utDoc);
+                        }
+
                         UpdateResult replaceResult = collection.replaceOne(pk, update);
                         if (replaceResult.getModifiedCount() == 0) {
                             msg("User not found");
@@ -739,7 +745,7 @@ long total = 0;
                     final long extraCredit = r.nextInt(1000) + 1000;
 
                     final long startMs = System.currentTimeMillis();
-                    addCredit(mainClient, randomuser, extraCredit,g);
+                    addCredit(mainClient, randomuser, extraCredit, g);
                     shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);
                     shc.incCounter(BaseChargingDemo.ADD_CREDIT);
                     users[randomuser].endTran();
@@ -755,7 +761,7 @@ long total = 0;
                     final long startMs = System.currentTimeMillis();
                     reportQuotaUsage(mainClient, randomuser, unitsUsed,
                             unitsWanted, users[randomuser].sessionId,
-                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(), g,users[randomuser]);
+                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(), g, users[randomuser]);
                     shc.reportLatency(BaseChargingDemo.REPORT_QUOTA_USAGE, startMs, "REPORT_QUOTA_USAGE", 2000);
                     shc.incCounter(BaseChargingDemo.REPORT_QUOTA_USAGE);
                     users[randomuser].endTran();
@@ -771,7 +777,7 @@ long total = 0;
             if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
                 lastGlobalQueryMs = System.currentTimeMillis();
 
-                queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID,userCount);
+                queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID, userCount);
 
             }
 
@@ -813,7 +819,7 @@ long total = 0;
             session.withTransaction(() -> {
                 Document userDoc = collection.find(eq(randomuser)).first();
                 if (userDoc != null) {
-                    collection.replaceOne(eq(randomuser), addCredit(userDoc,g,extraCredit));
+                    collection.replaceOne(eq(randomuser), addCredit(userDoc, g, extraCredit));
                 }
 
                 return null; // Return value as expected by the lambda
@@ -849,7 +855,7 @@ long total = 0;
 
                     collection.replaceOne(eq(randomuser), Document.parse(jsonObject));
 
-                 }
+                }
 
                 return null; // Return value as expected by the lambda
             }, txnOptions);
@@ -862,7 +868,7 @@ long total = 0;
     }
 
 
-    public static Document addCredit(Document document, Gson g, long amount ) {
+    public static Document addCredit(Document document, Gson g, long amount) {
 
         UserTable theUserTable = new UserTable(document);
 

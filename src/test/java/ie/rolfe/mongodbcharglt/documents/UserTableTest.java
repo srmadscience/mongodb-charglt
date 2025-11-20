@@ -7,12 +7,15 @@
  */
 package ie.rolfe.mongodbcharglt.documents;
 
+import com.google.gson.Gson;
 import ie.rolfe.mongodbcharglt.ReferenceData;
 import org.junit.jupiter.api.Test;
 
 import java.util.Date;
 import java.util.HashMap;
+import java.util.Random;
 
+import static ie.rolfe.mongodbcharglt.BaseChargingDemo.getExtraUserDataAsObject;
 import static ie.rolfe.mongodbcharglt.documents.UserTable.FIVE_MINUTES_IN_MS;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -28,7 +31,10 @@ class UserTableTest {
     final java.util.Date INITIAL_DATE = new Date();
 
     public UserTable getBasicTable() {
-        UserTable ut = UserTable.getUserTable("{}", INITIAL_CREDIT, USER_ID, INITIAL_DATE.getTime());
+        Gson g = new Gson();
+        Random r=new Random();
+        ExtraUserData eud = getExtraUserDataAsObject(100,  g,  r);
+        UserTable ut = UserTable.getUserTable(eud, INITIAL_CREDIT, USER_ID, INITIAL_DATE.getTime());
 
         UserUsageTable uu = new UserUsageTable(USER_ID, INITIAL_ALLOCATED, SESSION_ID, INITIAL_DATE);
         ut.setUserUsage(uu);
@@ -39,7 +45,10 @@ class UserTableTest {
     @Test
     void getUserTable() {
 
-        UserTable ut = UserTable.getUserTable("{}", INITIAL_CREDIT, USER_ID, INITIAL_DATE.getTime());
+        Gson g = new Gson();
+        Random r=new Random();
+        ExtraUserData eud = getExtraUserDataAsObject(100,  g,  r);
+        UserTable ut = UserTable.getUserTable(eud, INITIAL_CREDIT, USER_ID, INITIAL_DATE.getTime());
 
         assertEquals(ut.getAvailableCredit(), INITIAL_CREDIT);
     }
