@@ -1,7 +1,7 @@
 # mongodb-charglt
-Mongo implementation of Charglt
+Mongo implementation of [Charglt](https://github.com/srmadscience/voltdb-charglt), but on MongoDN
 
-* Has the  basic functionality of charglt, but is missing stuff  - see TODO
+It Has the  basic functionality of charglt, but is missing stuff  - see TODO
 ## TODO
  
 * Feed to downstream systems
