@@ -57,7 +57,7 @@ public class UserRecentTransactions extends AbstractBaseTable {
         userTxnId = document.getString("userTxnId");
         txnTime = getDate(document, "txnTime");
         sessionId = getLong(document, "sessionId");
-        sessionId = getLong(document, "sessionId");
+        approvedAmount = getLong(document, "approvedAmount");
         spentAmount = getLong(document, "spentAmount");
         purpose = document.getString("purpose");
     }

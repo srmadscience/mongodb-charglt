@@ -15,8 +15,9 @@
 
 package ie.rolfe.mongodbcharglt;
 
+import com.mongodb.reactivestreams.client.MongoClient;
 
-import com.mongodb.client.MongoClient;
+
 
 import java.util.Arrays;
 
@@ -48,7 +49,7 @@ public class DeleteChargingDemoData extends BaseChargingDemo {
             try {
                 MongoClient mainClient = connectMongoDB(hostlist);
 
-                deleteAllUsers(mainClient, recordCount, tpMs);
+                deleteAllUsers(mainClient, recordCount, tpMs, getExtraMsIfSet());
 
                 msg("Closing connection...");
                 mainClient.close();

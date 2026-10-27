@@ -17,27 +17,48 @@ package ie.rolfe.mongodbcharglt;
 
 import com.google.gson.Gson;
 import com.mongodb.BasicDBObject;
+import com.mongodb.ConnectionString;
+import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoException;
 import com.mongodb.TransactionOptions;
 import com.mongodb.WriteConcern;
-import com.mongodb.client.*;
-import com.mongodb.client.result.DeleteResult;
+import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.result.UpdateResult;
+import com.mongodb.reactivestreams.client.ClientSession;
+import com.mongodb.reactivestreams.client.MongoClient;
+import com.mongodb.reactivestreams.client.MongoClients;
+import com.mongodb.reactivestreams.client.MongoCollection;
 import ie.rolfe.mongodbcharglt.documents.ExtraUserData;
 import ie.rolfe.mongodbcharglt.documents.UserTable;
+import ie.rolfe.mongodbcharglt.documents.UserUsageTable;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.reactivestreams.Publisher;
 import org.voltdb.voltutil.stats.SafeHistogramCache;
+import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 import static com.mongodb.client.model.Filters.eq;
 import static com.mongodb.client.model.Filters.gt;
+import static com.mongodb.client.model.Filters.ne;
+import static com.mongodb.client.model.Updates.set;
 
 /**
  * This is an abstract class that contains the actual logic of the demo code.
+ * <p>
+ * Benchmarks run on a single thread that sends requests using the MongoDB reactive streams driver.
+ * Responses arrive on the driver's threads, which update the per-user state objects.
  */
 public abstract class BaseChargingDemo {
 
@@ -54,6 +75,7 @@ public abstract class BaseChargingDemo {
     public static final String ADD_DOC_ERROR = "Add Doc Error";
     public static final String UNABLE_TO_MEET_REQUESTED_TPS = "UNABLE_TO_MEET_REQUESTED_TPS";
     public static final String EXTRA_MS = "EXTRA_MS";
+    public static final String MAX_IN_FLIGHT_ENV = "MAX_IN_FLIGHT";
     public static final int MONGO_DEFAULT_PORT = 27017;
     private static final String CHARGLT_DATABASE = "CHARGLT_DB";
     private static final String CHARGLT_USERS = "CHARGLT_USERS";
@@ -61,7 +83,28 @@ public abstract class BaseChargingDemo {
     private static final String CLEAR_LOCK = "CLEAR_LOCK";
     private static final String CLEAR_UNFINISHED = "CLEAR_UNFINISHED";
     private static final String COUNT_USAGE_TOTAL_BY_DOC = "COUNT_USAGE_TOTAL_BY_DOC";
+    private static final String TXN_RETRY = "TXN_RETRY";
+    private static final String USER_NOT_FOUND = "USER_NOT_FOUND";
+    private static final String ASYNC_ERROR = "ASYNC_ERROR";
+    private static final int MAX_TXN_RETRIES = 10;
+    private static final int DEFAULT_MAX_IN_FLIGHT = 64;
     public static SafeHistogramCache shc = SafeHistogramCache.getInstance();
+
+    private static final TransactionOptions TXN_OPTIONS = TransactionOptions.builder()
+            .writeConcern(WriteConcern.MAJORITY)
+            .build();
+
+    /**
+     * How many requests we allow to be outstanding at once. More than the server can handle just
+     * adds queueing latency without adding throughput.
+     */
+    private static final int MAX_IN_FLIGHT = getMaxInFlight();
+
+    /**
+     * A permit for each request we're allowed to have outstanding. Stops us queuing work faster than
+     * MongoDB can do it, and lets us wait for everything to finish.
+     */
+    private static final Semaphore inFlight = new Semaphore(MAX_IN_FLIGHT);
 
     /**
      * Print a formatted message.
@@ -83,22 +126,79 @@ public abstract class BaseChargingDemo {
      *
      * @param connectionString list of hostnames
      * @return an instance of the DB client
-     * @throws Exception for various reasons
      */
-    @SuppressWarnings("deprecation")
-    protected static MongoClient connectMongoDB(String connectionString) throws Exception {
+    protected static MongoClient connectMongoDB(String connectionString) {
 
         String uri = "mongodb://" + connectionString + ":" + MONGO_DEFAULT_PORT + "/";
-        MongoClient mongoClient = null;
 
-        // Create a new client and connect to the server
-        try {
-            mongoClient = MongoClients.create(uri);
-        } catch (MongoException e) {
-            e.printStackTrace();
+        msg("Connecting to MongoDB at " + uri + ", up to " + MAX_IN_FLIGHT + " requests in flight");
+
+        MongoClientSettings settings = MongoClientSettings.builder()
+                .applyConnectionString(new ConnectionString(uri))
+                .applyToConnectionPoolSettings(pool -> pool.maxSize(Math.max(100, MAX_IN_FLIGHT)))
+                .build();
+
+        return MongoClients.create(settings);
+    }
+
+    private static MongoCollection<Document> getCollection(MongoClient mongoClient) {
+        return mongoClient.getDatabase(CHARGLT_DATABASE).getCollection(CHARGLT_USERS);
+    }
+
+    private static int getMaxInFlight() {
+        String max = System.getenv(MAX_IN_FLIGHT_ENV);
+        if (max == null || max.isEmpty()) {
+            return DEFAULT_MAX_IN_FLIGHT;
         }
+        return Integer.parseInt(max);
+    }
 
-        return mongoClient;
+    /**
+     * Wait for a free slot to send a request in.
+     */
+    private static void startRequest() throws InterruptedException {
+        inFlight.acquire();
+    }
+
+    /**
+     * Every request must call this exactly once when it finishes, whether it worked or not.
+     */
+    private static void endRequest() {
+        inFlight.release();
+    }
+
+    /**
+     * Wait for all outstanding requests to finish.
+     */
+    private static void drain() throws InterruptedException {
+        inFlight.acquire(MAX_IN_FLIGHT);
+        inFlight.release(MAX_IN_FLIGHT);
+    }
+
+    /**
+     * Send a request.
+     *
+     * @param request   the request
+     * @param onSuccess called with the result, if there is one
+     * @param onFinish  called exactly once after the request finishes, whether it worked or not
+     */
+    private static <T> void submit(Publisher<T> request, Consumer<T> onSuccess, Runnable onFinish)
+            throws InterruptedException {
+
+        startRequest();
+
+        Mono.from(request)
+                .doFinally(signal -> {
+                    try {
+                        onFinish.run();
+                    } finally {
+                        endRequest();
+                    }
+                })
+                .subscribe(onSuccess, e -> {
+                    shc.incCounter(ASYNC_ERROR);
+                    msg("Request failed: " + e.getMessage());
+                });
     }
 
     /**
@@ -126,42 +226,37 @@ public abstract class BaseChargingDemo {
     }
 
 
-    protected static void upsertAllUsers(int userCount, int tpMs, ExtraUserData ourEud, int initialCredit, MongoClient mongoClient, MongoClient otherClient)
+    protected static void upsertAllUsers(int userCount, int tpMs, ExtraUserData ourEud, int initialCredit,
+                                         MongoClient mongoClient, int extraMs)
             throws InterruptedException {
 
         final long startMsUpsert = System.currentTimeMillis();
 
-        SafeHistogramCache shc = SafeHistogramCache.getInstance();
-        long currentMs = System.currentTimeMillis();
-        int tpThisMs = 0;
+        TpMsThrottle throttle = new TpMsThrottle(tpMs, extraMs);
         Random r = new Random();
-        Gson g = new Gson();
 
-        MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
+        MongoCollection<Document> collection = getCollection(mongoClient);
+        ReplaceOptions upsert = new ReplaceOptions().upsert(true);
 
         for (int i = 0; i < userCount; i++) {
 
-            if (tpThisMs++ > tpMs) {
-
-                while (currentMs == System.currentTimeMillis()) {
-                    Thread.sleep(0, 50000);
-                }
-
-                currentMs = System.currentTimeMillis();
-                tpThisMs = 0;
-            }
+            throttle.await();
 
             UserTable newUser = UserTable.getUserTable(ourEud, r.nextInt(initialCredit), i, startMsUpsert);
             newUser.addCredit(100, "Txn_" + i);
             newUser.reportQuotaUsage(100, 10, 100, "TX2_" + i);
-            String jsonObject = g.toJson(newUser, UserTable.class);
 
-            Document document2 = Document.parse(jsonObject);
             final long startMs = System.currentTimeMillis();
-            collection.insertOne(document2);
-            shc.reportLatency(BaseChargingDemo.ADD_DOC, startMs, "Add time", 2000);
-            shc.incCounter(BaseChargingDemo.ADD_DOC);
+            final boolean[] worked = {false};
+
+            submit(collection.replaceOne(eq(i), newUser.toDocument(), upsert), result -> worked[0] = true, () -> {
+                if (worked[0]) {
+                    shc.reportLatency(BaseChargingDemo.ADD_DOC, startMs, "Add time", 2000);
+                    shc.incCounter(BaseChargingDemo.ADD_DOC);
+                } else {
+                    shc.incCounter(BaseChargingDemo.ADD_DOC_ERROR);
+                }
+            });
 
             if (i % 100000 == 1) {
                 msg("Upserted " + i + " users...");
@@ -170,55 +265,40 @@ public abstract class BaseChargingDemo {
                     msg("Errors detected. Halting...");
                     break;
                 } else {
-                    queryUserAndStats(mongoClient, i, userCount);
+                    queryUserAndStats(mongoClient, i);
                 }
 
             }
 
         }
 
+        drain();
 
-        long entriesPerMS = userCount / (System.currentTimeMillis() - startMsUpsert);
+        long entriesPerMS = userCount / Math.max(1, System.currentTimeMillis() - startMsUpsert);
         msg("Upserted " + entriesPerMS + " users per ms...");
         msg(shc.toString());
     }
 
 
-    protected static void deleteAllUsers(MongoClient mongoClient, int userCount, int tpMs) {
+    protected static void deleteAllUsers(MongoClient mongoClient, int userCount, int tpMs, int extraMs)
+            throws InterruptedException {
 
         final long startMsUpsert = System.currentTimeMillis();
 
-        SafeHistogramCache shc = SafeHistogramCache.getInstance();
-        long currentMs = System.currentTimeMillis();
-        int tpThisMs = 0;
-
-        MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
+        TpMsThrottle throttle = new TpMsThrottle(tpMs, extraMs);
+        MongoCollection<Document> collection = getCollection(mongoClient);
 
         for (int i = 0; i < userCount; i++) {
 
-            if (tpThisMs++ > tpMs) {
+            throttle.await();
 
-                while (currentMs == System.currentTimeMillis()) {
-                    try {
-                        Thread.sleep(0, 50000);
-                    } catch (InterruptedException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
+            final long startMs = System.currentTimeMillis();
+            final boolean[] deleted = {false};
 
-                currentMs = System.currentTimeMillis();
-                tpThisMs = 0;
-            }
-
-            long startNs = System.currentTimeMillis();
-            DeleteResult dl = collection.deleteOne(eq(i));
-            shc.reportLatency(BaseChargingDemo.DELETE_DOC, startNs, "Delete time", 2000);
-            if (dl.getDeletedCount() == 1) {
-                shc.incCounter(BaseChargingDemo.DELETE_DOC);
-            } else {
-                shc.incCounter(BaseChargingDemo.DELETE_DOC_ERROR);
-            }
+            submit(collection.deleteOne(eq(i)), result -> deleted[0] = result.getDeletedCount() == 1, () -> {
+                shc.reportLatency(BaseChargingDemo.DELETE_DOC, startMs, "Delete time", 2000);
+                shc.incCounter(deleted[0] ? BaseChargingDemo.DELETE_DOC : BaseChargingDemo.DELETE_DOC_ERROR);
+            });
 
             if (i % 100000 == 1) {
                 msg("Deleted " + i + " users...");
@@ -226,7 +306,9 @@ public abstract class BaseChargingDemo {
 
         }
 
-        long entriesPerMS = userCount / (System.currentTimeMillis() - startMsUpsert);
+        drain();
+
+        long entriesPerMS = userCount / Math.max(1, System.currentTimeMillis() - startMsUpsert);
         msg("Deleted " + entriesPerMS + " users per ms...");
         msg(shc.toString());
 
@@ -235,51 +317,45 @@ public abstract class BaseChargingDemo {
     /**
      * Convenience method to query a user a general stats and log the results
      */
-    protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId, int userCount) {
-        MongoDatabase database = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
+    protected static void queryUserAndStats(MongoClient mongoClient, long queryUserId) {
+        MongoCollection<Document> collection = getCollection(mongoClient);
 
         // Query user #queryUserId...
         msg("Query user #" + queryUserId + "...");
-        getUser(queryUserId, collection, BaseChargingDemo::reportDocument);
+        reportDocument(Mono.from(collection.find(eq(queryUserId)).first()).block());
 
         msg("Show amount of credit currently reserved for products...");
-        getCurrentReservedCredit(collection, userCount);
+        getCurrentReservedCredit(collection);
 
     }
 
-    private static void getCurrentReservedCredit(MongoCollection<Document> collection, int userCount) {
+    /**
+     * Total reserved credit across all users, as a single aggregation on the server rather than
+     * a doc by doc fetch.
+     */
+    private static void getCurrentReservedCredit(MongoCollection<Document> collection) {
 
         final long getDocByDocMs = System.currentTimeMillis();
 
-        SafeHistogramCache shc = SafeHistogramCache.getInstance();
-        Random r = new Random();
-        Gson g = new Gson();
-        long total = 0;
+        // userUsage is a map of session id -> reservation, so turn it into an array and add up allocatedAmount
+        List<Bson> pipeline = List.of(
+                new Document("$project", new Document("reserved",
+                        new Document("$sum", new Document("$map",
+                                new Document("input", new Document("$objectToArray", "$userUsage"))
+                                        .append("in", "$$this.v.allocatedAmount"))))),
+                new Document("$group", new Document("_id", null)
+                        .append("total", new Document("$sum", "$reserved"))
+                        .append("users", new Document("$sum", 1))));
 
-        for (int i = 0; i < userCount; i++) {
+        Document result = Mono.from(collection.aggregate(pipeline).first()).block();
 
-            Document userDoc = collection.find(eq(i)).first();
-            UserTable ut = new UserTable(userDoc);
-            total += ut.getUsageBalance();
-
-            if (i % 100000 == 1) {
-                msg("Queried " + i + " users. Total is " + total);
-
-            }
-
+        if (result == null) {
+            msg("Total for 0 users is 0");
+        } else {
+            msg("Total for " + result.get("users") + " users is " + result.get("total"));
         }
 
-
-        msg("Total for " + userCount + " users is " + total);
-
         shc.reportLatency(BaseChargingDemo.COUNT_USAGE_TOTAL_BY_DOC, getDocByDocMs, "Time to count usage", 10000);
-    }
-
-    private static void getUser(long queryUserId, MongoCollection<Document> collection, java.util.function.Consumer<Document> nextStep) {
-        Document userDoc = collection.find(eq(queryUserId)).first();
-
-        reportDocument(userDoc);
     }
 
 
@@ -291,6 +367,65 @@ public abstract class BaseChargingDemo {
             msg(foo.toString());
 
         }
+    }
+
+    /**
+     * Read a user, change it, and write it back, all inside a transaction. If MongoDB reports a transient
+     * transaction error, such as a write conflict with another client, we retry with a new session -
+     * which is what withTransaction does for the sync driver.
+     *
+     * @param mongoClient
+     * @param userId
+     * @param change      changes the UserTable and returns true if it needs to be written
+     * @return the UserTable as written, or empty if the user doesn't exist
+     */
+    private static Mono<UserTable> readModifyWrite(MongoClient mongoClient, long userId, Predicate<UserTable> change) {
+
+        MongoCollection<Document> collection = getCollection(mongoClient);
+
+        return Mono.usingWhen(
+                        Mono.from(mongoClient.startSession()),
+                        session -> {
+                            session.startTransaction(TXN_OPTIONS);
+
+                            return Mono.from(collection.find(session, eq(userId)).first())
+                                    .switchIfEmpty(Mono.defer(() -> {
+                                        shc.incCounter(USER_NOT_FOUND);
+                                        msg("User " + userId + " not found");
+                                        return Mono.empty();
+                                    }))
+                                    .flatMap(userDoc -> {
+                                        UserTable ut = new UserTable(userDoc);
+                                        if (!change.test(ut)) {
+                                            return Mono.just(ut);
+                                        }
+                                        return Mono.from(collection.replaceOne(session, eq(userId), ut.toDocument()))
+                                                .thenReturn(ut);
+                                    })
+                                    .flatMap(ut -> Mono.from(session.commitTransaction()).thenReturn(ut));
+                        },
+                        BaseChargingDemo::endSession,
+                        (session, error) -> endSession(session),
+                        BaseChargingDemo::endSession)
+                .retryWhen(Retry.max(MAX_TXN_RETRIES)
+                        .filter(BaseChargingDemo::isRetryable)
+                        .doBeforeRetry(signal -> shc.incCounter(TXN_RETRY)));
+    }
+
+    /**
+     * Abort the session's transaction if it's still open, then close it.
+     */
+    private static Mono<Void> endSession(ClientSession session) {
+
+        Mono<Void> abort = session.hasActiveTransaction() ? Mono.from(session.abortTransaction()) : Mono.empty();
+
+        return abort.onErrorResume(e -> Mono.empty()).doFinally(signal -> session.close());
+    }
+
+    private static boolean isRetryable(Throwable e) {
+        return e instanceof MongoException me
+                && (me.hasErrorLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)
+                || me.hasErrorLabel(MongoException.UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL));
     }
 
 
@@ -314,8 +449,6 @@ public abstract class BaseChargingDemo {
                                             int jsonsize, MongoClient mainClient, int deltaProportion, int extraMs)
             throws InterruptedException {
 
-        long lastGlobalQueryMs = 0;
-
         UserKVState[] userState = new UserKVState[userCount];
 
         Random r = new Random();
@@ -326,8 +459,7 @@ public abstract class BaseChargingDemo {
         }
 
         final long startMsRun = System.currentTimeMillis();
-        long currentMs = System.currentTimeMillis();
-        int tpThisMs = 0;
+        TpMsThrottle throttle = new TpMsThrottle(tpMs, extraMs);
 
         final long endtimeMs = System.currentTimeMillis() + (durationSeconds * 1000L);
 
@@ -339,102 +471,84 @@ public abstract class BaseChargingDemo {
         int fullUpdate = 0;
         int deltaUpdate = 0;
 
-        int firstSession = Integer.MIN_VALUE;
+        // Keep an eye on one user while we run...
+        final int watchedUser = r.nextInt(userCount);
+        ScheduledExecutorService globalQueries = startGlobalQueries(mainClient, watchedUser, globalQueryFreqSeconds);
 
-        while (endtimeMs > System.currentTimeMillis()) {
+        try {
+            while (endtimeMs > System.currentTimeMillis()) {
 
-            if (tpThisMs++ > tpMs) {
+                throttle.await();
 
-                while (currentMs == System.currentTimeMillis()) {
-                    Thread.sleep(0, 50000);
+                // Find session to do a transaction for...
+                int oursession = r.nextInt(userCount);
 
-                }
+                // See if session already has an active transaction and avoid
+                // it if it does.
+                if (userState[oursession].isTxInFlight()) {
 
-                sleepExtraMSIfNeeded(extraMs);
+                    inFlightCount++;
 
-                currentMs = System.currentTimeMillis();
-                tpThisMs = 0;
-            }
+                } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_LOCKED_BY_SOMEONE_ELSE) {
 
-            // Find session to do a transaction for...
-            int oursession = r.nextInt(userCount);
+                    if (userState[oursession].getOtherLockTimeMs() + ReferenceData.LOCK_TIMEOUT_MS < System
+                            .currentTimeMillis()) {
 
-            if (firstSession == Integer.MIN_VALUE) {
-                firstSession = oursession;
-            }
+                        userState[oursession].startTran();
+                        userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
+                        GetAndLockUser(mainClient, userState[oursession], oursession);
+                        lockCount++;
 
-            // See if session already has an active transaction and avoid
-            // it if it does.
-            if (userState[oursession].isTxInFlight()) {
+                    } else {
+                        contestedLockCount++;
+                    }
 
-                inFlightCount++;
-
-            } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_LOCKED_BY_SOMEONE_ELSE) {
-
-                if (userState[oursession].getOtherLockTimeMs() + ReferenceData.LOCK_TIMEOUT_MS < System
-                        .currentTimeMillis()) {
+                } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_UNLOCKED) {
 
                     userState[oursession].startTran();
                     userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                    GetAndLockUser(mainClient, userState[oursession], oursession, gson);
+                    GetAndLockUser(mainClient, userState[oursession], oursession);
                     lockCount++;
 
-                } else {
-                    contestedLockCount++;
+                } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_LOCKED) {
+
+                    userState[oursession].startTran();
+                    userState[oursession].setStatus(UserKVState.STATUS_UPDATING);
+
+                    if (deltaProportion > r.nextInt(101)) {
+                        deltaUpdate++;
+                        // Instead of sending entire JSON object across wire ask app to update loyalty
+                        // number. For
+                        // large values stored as JSON this can have a dramatic effect on network
+                        // bandwidth
+                        UpdateLockedUser(mainClient, userState[oursession], userState[oursession].getLockId(),
+                                oursession, getNewLoyaltyCardNumber(r) + "", ExtraUserData.NEW_LOYALTY_NUMBER);
+                    } else {
+                        fullUpdate++;
+                        UpdateLockedUser(mainClient, userState[oursession], userState[oursession].getLockId(),
+                                oursession, getExtraUserDataAsObject(jsonsize, gson, r), null);
+                    }
+
                 }
 
-            } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_UNLOCKED) {
+                tranCount++;
 
-                userState[oursession].startTran();
-                userState[oursession].setStatus(UserKVState.STATUS_TRYING_TO_LOCK);
-                GetAndLockUser(mainClient, userState[oursession], oursession, gson);
-                lockCount++;
-
-            } else if (userState[oursession].getUserStatus() == UserKVState.STATUS_LOCKED) {
-
-                userState[oursession].startTran();
-                userState[oursession].setStatus(UserKVState.STATUS_UPDATING);
-
-                if (deltaProportion > r.nextInt(101)) {
-                    deltaUpdate++;
-                    // Instead of sending entire JSON object across wire ask app to update loyalty
-                    // number. For
-                    // large values stored as JSON this can have a dramatic effect on network
-                    // bandwidth
-                    UpdateLockedUser(mainClient, userState[oursession],
-                            userState[oursession].getLockId(), getNewLoyaltyCardNumber(r) + "",
-                            ExtraUserData.NEW_LOYALTY_NUMBER, gson);
-                } else {
-                    fullUpdate++;
-                    UpdateLockedUser(mainClient, userState[oursession],
-                            userState[oursession].getLockId(), getExtraUserDataAsObject(jsonsize, gson, r), null, gson);
+                if (tranCount % 100000 == 1) {
+                    msg("Transaction " + tranCount);
                 }
 
             }
 
-            tranCount++;
-            userState[oursession].endTran(); //TODO - Fix when we make async
+            msg(tranCount + " transactions done...");
+            msg("All entries in queue, waiting for it to drain...");
+            drain();
+            msg("Queue drained...");
 
-            if (tranCount % 100000 == 1) {
-                msg("Transaction " + tranCount);
-            }
-
-            // See if we need to do global queries...
-            if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
-                lastGlobalQueryMs = System.currentTimeMillis();
-
-                queryUserAndStats(mainClient, firstSession, userCount);
-
-            }
-
+        } finally {
+            globalQueries.shutdownNow();
         }
 
-
-        msg(tranCount + " transactions done...");
-        msg("All entries in queue, waiting for it to drain...");
-        msg("Queue drained...");
-
-        long transactionsPerMs = tranCount / (System.currentTimeMillis() - startMsRun);
+        long transactionsPerMs = tranCount / Math.max(1, System.currentTimeMillis() - startMsRun);
         msg("processed " + transactionsPerMs + " entries per ms while doing transactions...");
 
         long lockFailCount = 0;
@@ -448,6 +562,8 @@ public abstract class BaseChargingDemo {
         msg(lockFailCount + " lock attempt failures");
         msg(fullUpdate + " full updates");
         msg(deltaUpdate + " delta updates");
+        msg("Retries caused by concurrent changes = " + shc.getCounter(TXN_RETRY));
+        msg("Errors = " + shc.getCounter(ASYNC_ERROR));
 
         double tps = tranCount;
         tps = tps / (System.currentTimeMillis() - startMsRun);
@@ -459,157 +575,105 @@ public abstract class BaseChargingDemo {
         return tps / (tpMs * 1000) > .9;
     }
 
-    private static void GetAndLockUser(MongoClient mongoClient, UserKVState userKVState, int sessionId, Gson gson) {
+    private static void GetAndLockUser(MongoClient mongoClient, UserKVState userKVState, int sessionId)
+            throws InterruptedException {
 
-        MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
-        // Sets transaction options
-        TransactionOptions txnOptions = TransactionOptions.builder()
-                .writeConcern(WriteConcern.MAJORITY)
-                .build();
-
-        Bson pk = eq(userKVState.id);
         final long startMs = System.currentTimeMillis();
-        try (ClientSession session = mongoClient.startSession()) {
-            // Uses withTransaction and lambda for transaction operations
-            session.withTransaction(() -> {
-                Document userDoc = collection.find(pk).first();
-                if (userDoc != null) {
-                    UserTable ut = new UserTable(userDoc);
-                    ut.lock();
-                    Document update = userDoc.append("userSoftlockExpiry", ut.userSoftlockExpiry).append("userSoftLockSessionId", ut.userSoftLockSessionId);
-                    UpdateResult replaceResult = collection.replaceOne(pk, update);
-                    if (replaceResult.getModifiedCount() == 0) {
-                        msg("User not found");
-                    } else {
-                        userKVState.setLockId(ut.userSoftLockSessionId);
-                    }
-                }
+        final long[] newLockId = {NO_SESSION};
+        final UserTable[] lockedUser = {null};
 
-                return null; // Return value as expected by the lambda
-            }, txnOptions);
+        submit(readModifyWrite(mongoClient, sessionId, ut -> {
+            // lock() returns NO_SESSION if someone else holds an unexpired lock
+            newLockId[0] = ut.lock();
+            return newLockId[0] != NO_SESSION;
+        }), ut -> lockedUser[0] = ut, () -> {
+
+            if (lockedUser[0] == null) {
+                userKVState.setLockId(NO_SESSION);
+            } else if (newLockId[0] == NO_SESSION) {
+                userKVState.setLockId(NO_SESSION);
+                userKVState.setStatus(UserKVState.STATUS_LOCKED_BY_SOMEONE_ELSE);
+                userKVState.lockedBySomeoneElseCount++;
+                userKVState.otherLockTimeMs = System.currentTimeMillis();
+            } else {
+                userKVState.setLockId(newLockId[0]);
+            }
 
             shc.reportLatency(BaseChargingDemo.KV_GET, startMs, "KV Get time", 2000);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
+            // Must be last - tells the sending thread it can use this user again
+            userKVState.endTran();
+        });
 
     }
 
-    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId, Object extraPayload, String deltaOperationName, Gson gson) {
+    private static void UpdateLockedUser(MongoClient mongoClient, UserKVState userKVState, long lockId,
+                                         int sessionId, Object extraPayload, String deltaOperationName)
+            throws InterruptedException {
 
-        MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
-        // Sets transaction options
-        TransactionOptions txnOptions = TransactionOptions.builder()
-                .writeConcern(WriteConcern.MAJORITY)
-                .build();
-
-        Bson pk = eq(userKVState.id);
         final long startMs = System.currentTimeMillis();
-        try (ClientSession session = mongoClient.startSession()) {
-            // Uses withTransaction and lambda for transaction operations
-            session.withTransaction(() -> {
-                Document userDoc = collection.find(pk).first();
-                if (userDoc != null) {
-                    UserTable ut = new UserTable(userDoc);
 
-                    if (ut.isLockedBySomeoneElse(lockId)) {
-                        userKVState.lockedBySomeoneElseCount++;
-                        msg(userKVState.id + ": locked by session " + ut.userId + " until " + ut.userSoftlockExpiry);
-                    } else {
+        submit(readModifyWrite(mongoClient, sessionId, ut -> {
 
-                        ut.unLock();//
-                        Document update;
+            if (ut.isLockedBySomeoneElse(lockId)) {
+                userKVState.lockedBySomeoneElseCount++;
+                msg(sessionId + ": locked by session " + ut.userSoftLockSessionId + " until " + ut.userSoftlockExpiry);
+                return false;
+            }
 
-                        if (extraPayload instanceof String) {
-                            ut.userDataObject.loyaltySchemeNumber = Long.parseLong((String) extraPayload);
-                            Document utDoc = Document.parse(gson.toJson(ut.userDataObject));
-                            update = userDoc.append("userSoftlockExpiry", null).append("userSoftLockSessionId", NO_SESSION).append("userDataObject", utDoc);
-                        } else {
-                            Document utDoc = Document.parse(gson.toJson(extraPayload));
-                            update = userDoc.append("userSoftlockExpiry", null).append("userSoftLockSessionId", NO_SESSION).append("userDataObject", utDoc);
-                        }
+            if (deltaOperationName != null && deltaOperationName.equals(ExtraUserData.NEW_LOYALTY_NUMBER)) {
+                ut.userDataObject.loyaltySchemeNumber = Long.parseLong((String) extraPayload);
+            } else {
+                ut.userDataObject = (ExtraUserData) extraPayload;
+            }
 
-                        UpdateResult replaceResult = collection.replaceOne(pk, update);
-                        if (replaceResult.getModifiedCount() == 0) {
-                            msg("User not found");
-                        }
-                        userKVState.setLockId(NO_SESSION);
-                    }
-                }
+            ut.unLock();
+            return true;
 
-                return null; // Return value as expected by the lambda
-            }, txnOptions);
+        }), ut -> {
+        }, () -> {
+            userKVState.setLockId(NO_SESSION);
             shc.reportLatency(BaseChargingDemo.KV_PUT, startMs, "KV Put Time", 2000);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
+            // Must be last - tells the sending thread it can use this user again
+            userKVState.endTran();
+        });
 
     }
 
     /**
-     * Used when we need to really slow down below 1 tx per ms..
-     *
-     * @param extraMs an arbitrary extra delay.
+     * Report on one user and global stats every freqSeconds, on a thread of its own so the
+     * sending thread isn't held up.
      */
-    private static void sleepExtraMSIfNeeded(int extraMs) {
-        if (extraMs > 0) {
-            try {
-                Thread.sleep(extraMs);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-        }
+    private static ScheduledExecutorService startGlobalQueries(MongoClient mongoClient, long queryUserId,
+                                                               int freqSeconds) {
 
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.scheduleWithFixedDelay(() -> {
+            try {
+                queryUserAndStats(mongoClient, queryUserId);
+            } catch (Exception e) {
+                msg("Global query failed: " + e.getMessage());
+            }
+        }, freqSeconds, Math.max(1, freqSeconds), TimeUnit.SECONDS);
+
+        return scheduler;
     }
 
     /**
      * Convenience method to remove unneeded records storing old allotments of
-     * credit.
+     * credit. Done as a single updateMany on the server.
      *
      */
-    protected static void clearUnfinishedTransactions(MongoClient mongoClient, int usercount, Gson g)
-            throws Exception {
-
-        MongoDatabase kvDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = kvDatabase.getCollection(CHARGLT_USERS);
-        // Sets transaction options
-        TransactionOptions txnOptions = TransactionOptions.builder()
-                .writeConcern(WriteConcern.MAJORITY)
-                .build();
+    protected static void clearUnfinishedTransactions(MongoClient mongoClient) {
 
         msg("clearUnfinishedTransactions...");
-        for (int id = 0; id < usercount; id++) {
-            Bson pk = eq(id);
-            final long startMs = System.currentTimeMillis();
-            try (ClientSession session = mongoClient.startSession()) {
-                // Uses withTransaction and lambda for transaction operations
-                session.withTransaction(() -> {
-                    Document userDoc = collection.find(pk).first();
-                    if (userDoc != null) {
-                        UserTable ut = new UserTable(userDoc);
-                        ut.clearSessions();
-                        Document update = userDoc.append("userUsage", ut.userUsage);
-                        UpdateResult replaceResult = collection.replaceOne(pk, update);
-                        if (replaceResult.getModifiedCount() == 0) {
-                            msg("User " + pk + " not found on update");
-                        }
-                    } else {
-                        msg("User " + pk + " not found on query");
-                    }
+        final long startMs = System.currentTimeMillis();
 
-                    return null; // Return value as expected by the lambda
-                }, txnOptions);
+        UpdateResult result = Mono.from(getCollection(mongoClient)
+                        .updateMany(ne("userUsage", new Document()), set("userUsage", new Document())))
+                .block();
 
-                shc.reportLatency(BaseChargingDemo.CLEAR_UNFINISHED, startMs, "clear unfinished", 2000);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-        msg("...done");
+        shc.reportLatency(BaseChargingDemo.CLEAR_UNFINISHED, startMs, "clear unfinished", 10000);
+        msg("...done. Cleared " + (result == null ? 0 : result.getModifiedCount()) + " users");
 
     }
 
@@ -622,8 +686,6 @@ public abstract class BaseChargingDemo {
     protected static void unlockAllRecords(MongoClient mongoClient) {
 
         msg("Clearing locked sessions from prior runs...");
-        MongoDatabase chargingDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = chargingDatabase.getCollection(CHARGLT_USERS);
         BasicDBObject updateFields = new BasicDBObject();
         updateFields.append("userSoftlockExpiry", NO_EXPIRY);
         updateFields.append("userSoftLockSessionId", NO_SESSION);
@@ -631,8 +693,9 @@ public abstract class BaseChargingDemo {
         setQuery.append("$set", updateFields);
 
         final long startMs = System.currentTimeMillis();
-        UpdateResult userDoc = collection.updateMany(gt("userSoftLockSessionId", NO_SESSION), setQuery);
-        msg("Unlocked " + userDoc.getModifiedCount() + " records");
+        UpdateResult result = Mono.from(getCollection(mongoClient)
+                .updateMany(gt("userSoftLockSessionId", NO_SESSION), setQuery)).block();
+        msg("Unlocked " + (result == null ? 0 : result.getModifiedCount()) + " records");
 
         shc.reportLatency(BaseChargingDemo.CLEAR_LOCK, startMs, "Clear Locks", 10000);
 
@@ -655,14 +718,10 @@ public abstract class BaseChargingDemo {
      * @throws InterruptedException
      */
     protected static boolean runTransactionBenchmark(int userCount, int tpMs, int durationSeconds,
-                                                     int globalQueryFreqSeconds, MongoClient mainClient, MongoClient otherClient, int extraMs)
+                                                     int globalQueryFreqSeconds, MongoClient mainClient, int extraMs)
             throws InterruptedException {
 
-        Gson g = new Gson();
-        MongoDatabase database = mainClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = database.getCollection(CHARGLT_USERS);
-
-        // Used to track changes and be unique when we are running multiple threads
+        // Used to track changes and be unique when we are running multiple processes
         final long pid = getPid();
 
         Random r = new Random();
@@ -677,8 +736,7 @@ public abstract class BaseChargingDemo {
         }
 
         final long startMsRun = System.currentTimeMillis();
-        long currentMs = System.currentTimeMillis();
-        int tpThisMs = 0;
+        TpMsThrottle throttle = new TpMsThrottle(tpMs, extraMs);
 
         final long endtimeMs = System.currentTimeMillis() + (durationSeconds * 1000L);
 
@@ -687,92 +745,73 @@ public abstract class BaseChargingDemo {
         long inFlightCount = 0;
         long addCreditCount = 0;
         long reportUsageCount = 0;
-        long lastGlobalQueryMs = System.currentTimeMillis();
 
         msg("starting...");
 
-        while (endtimeMs > System.currentTimeMillis()) {
+        ScheduledExecutorService globalQueries = startGlobalQueries(mainClient, GENERIC_QUERY_USER_ID,
+                globalQueryFreqSeconds);
 
-            if (tpThisMs++ > tpMs) {
+        try {
+            while (endtimeMs > System.currentTimeMillis()) {
 
-                while (currentMs == System.currentTimeMillis()) {
-                    Thread.sleep(0, 50000);
+                throttle.await();
 
-                }
+                int randomuser = r.nextInt(userCount);
 
-                sleepExtraMSIfNeeded(extraMs);
-
-                currentMs = System.currentTimeMillis();
-                tpThisMs = 0;
-            }
-
-            int randomuser = r.nextInt(userCount);
-
-            if (users[randomuser].isTxInFlight()) {
-                inFlightCount++;
-            } else {
-
-                users[randomuser].startTran();
-
-                if (users[randomuser].spendableBalance < 1000) {
-
-                    addCreditCount++;
-
-                    final long extraCredit = r.nextInt(1000) + 1000;
-
-                    final long startMs = System.currentTimeMillis();
-                    addCredit(mainClient, randomuser, extraCredit, g);
-                    shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);
-                    shc.incCounter(BaseChargingDemo.ADD_CREDIT);
-                    users[randomuser].endTran();
-                    users[randomuser].spendableBalance += extraCredit;
-
-
+                if (users[randomuser].isTxInFlight()) {
+                    inFlightCount++;
                 } else {
 
-                    reportUsageCount++;
+                    users[randomuser].startTran();
 
-                    int unitsUsed = (int) (users[randomuser].currentlyReserved * 0.9);
-                    int unitsWanted = r.nextInt(100);
-                    final long startMs = System.currentTimeMillis();
-                    reportQuotaUsage(mainClient, randomuser, unitsUsed,
-                            unitsWanted, users[randomuser].sessionId,
-                            "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(), g, users[randomuser]);
-                    shc.reportLatency(BaseChargingDemo.REPORT_QUOTA_USAGE, startMs, "REPORT_QUOTA_USAGE", 2000);
-                    shc.incCounter(BaseChargingDemo.REPORT_QUOTA_USAGE);
-                    users[randomuser].endTran();
+                    if (users[randomuser].spendableBalance < 1000) {
 
+                        addCreditCount++;
+
+                        final long extraCredit = r.nextInt(1000) + 1000;
+                        addCredit(mainClient, randomuser, extraCredit, users[randomuser]);
+
+                    } else {
+
+                        reportUsageCount++;
+
+                        int unitsUsed = (int) (users[randomuser].currentlyReserved * 0.9);
+                        int unitsWanted = r.nextInt(100);
+                        reportQuotaUsage(mainClient, randomuser, unitsUsed, unitsWanted,
+                                users[randomuser].sessionId,
+                                "ReportQuotaUsage_" + pid + "_" + reportUsageCount + "_" + System.currentTimeMillis(),
+                                users[randomuser]);
+
+                    }
                 }
-            }
 
-            if (tranCount++ % 100000 == 0) {
-                msg("On transaction #" + tranCount);
-            }
-
-            // See if we need to do global queries...
-            if (lastGlobalQueryMs + (globalQueryFreqSeconds * 1000L) < System.currentTimeMillis()) {
-                lastGlobalQueryMs = System.currentTimeMillis();
-
-                queryUserAndStats(mainClient, GENERIC_QUERY_USER_ID, userCount);
+                if (tranCount++ % 100000 == 0) {
+                    msg("On transaction #" + tranCount);
+                }
 
             }
 
+            msg("finished adding transactions to queue");
+            drain();
+            msg("Queue drained");
+
+        } finally {
+            globalQueries.shutdownNow();
         }
-
-        msg("finished adding transactions to queue");
-        msg("Queue drained");
 
         long elapsedTimeMs = System.currentTimeMillis() - startMsRun;
         msg("Processed " + tranCount + " transactions in " + elapsedTimeMs + " milliseconds");
 
         double tps = tranCount;
-        tps = tps / (elapsedTimeMs / 1000);
+        tps = tps / (elapsedTimeMs / 1000d);
 
         msg("TPS = " + tps);
 
         msg("Add Credit calls = " + addCreditCount);
         msg("Report Usage calls = " + reportUsageCount);
         msg("Skipped because transaction was in flight = " + inFlightCount);
+        msg("Retries caused by concurrent changes = " + shc.getCounter(TXN_RETRY));
+        msg("Errors = " + shc.getCounter(ASYNC_ERROR));
 
         reportRunLatencyStats(tpMs, tps);
 
@@ -781,79 +820,51 @@ public abstract class BaseChargingDemo {
     }
 
 
-    private static void addCredit(MongoClient mongoClient, int randomuser, long extraCredit, Gson g) {
+    private static void addCredit(MongoClient mongoClient, int randomuser, long extraCredit,
+                                  UserTransactionState userTS) throws InterruptedException {
 
-        MongoDatabase restaurantsDatabase = mongoClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
-        // Sets transaction options
-        TransactionOptions txnOptions = TransactionOptions.builder()
-                .writeConcern(WriteConcern.MAJORITY)
-                .build();
+        final long startMs = System.currentTimeMillis();
+        final String txnId = "AddCredit_" + getPid() + "_" + randomuser + "_" + System.nanoTime();
 
-        try (ClientSession session = mongoClient.startSession()) {
-            // Uses withTransaction and lambda for transaction operations
-            session.withTransaction(() -> {
-                Document userDoc = collection.find(eq(randomuser)).first();
-                if (userDoc != null) {
-                    collection.replaceOne(eq(randomuser), addCredit(userDoc, g, extraCredit));
-                }
-
-                return null; // Return value as expected by the lambda
-            }, txnOptions);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
+        submit(readModifyWrite(mongoClient, randomuser, ut -> {
+            ut.addCredit(extraCredit, txnId);
+            return true;
+        }), ut -> {
+            userTS.spendableBalance = ut.getAvailableCredit();
+            shc.reportLatency(BaseChargingDemo.KV_PUT, startMs, "KV Put time", 2000);
+        }, () -> {
+            shc.reportLatency(BaseChargingDemo.ADD_CREDIT, startMs, "ADD_CREDIT", 2000);
+            shc.incCounter(BaseChargingDemo.ADD_CREDIT);
+            // Must be last - tells the sending thread it can use this user again
+            userTS.endTran();
+        });
 
     }
 
 
-    private static void reportQuotaUsage(MongoClient mainClient, int randomuser, int unitsUsed, int unitsWanted, long sessionId, String txnId, Gson gson, UserTransactionState userTS) {
+    private static void reportQuotaUsage(MongoClient mongoClient, int randomuser, int unitsUsed, int unitsWanted,
+                                         long sessionId, String txnId, UserTransactionState userTS)
+            throws InterruptedException {
 
-        MongoDatabase restaurantsDatabase = mainClient.getDatabase(CHARGLT_DATABASE);
-        MongoCollection<Document> collection = restaurantsDatabase.getCollection(CHARGLT_USERS);
+        final long startMs = System.currentTimeMillis();
 
-        // Sets transaction options
-        TransactionOptions txnOptions = TransactionOptions.builder()
-                .writeConcern(WriteConcern.MAJORITY)
-                .build();
-
-        try (ClientSession session = mainClient.startSession()) {
-            // Uses withTransaction and lambda for transaction operations
-            session.withTransaction(() -> {
-                Document document = collection.find(eq(randomuser)).first();
-                if (document != null) {
-                    UserTable theUserTable = new UserTable(document);
-                    theUserTable.reportQuotaUsage(unitsUsed, unitsWanted, sessionId, txnId);
-                    String jsonObject = gson.toJson(theUserTable, UserTable.class);
-                    userTS.spendableBalance = theUserTable.getAvailableCredit();
-
-                    collection.replaceOne(eq(randomuser), Document.parse(jsonObject));
-
-                }
-
-                return null; // Return value as expected by the lambda
-            }, txnOptions);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
+        submit(readModifyWrite(mongoClient, randomuser, ut -> {
+            ut.reportQuotaUsage(unitsUsed, unitsWanted, sessionId, txnId);
+            return true;
+        }), ut -> {
+            userTS.spendableBalance = ut.getAvailableCredit();
+            UserUsageTable reservation = ut.getUserUsage(sessionId);
+            userTS.currentlyReserved = reservation == null ? 0 : reservation.allocatedAmount;
+            shc.reportLatency(BaseChargingDemo.KV_PUT, startMs, "KV Put time", 2000);
+        }, () -> {
+            shc.reportLatency(BaseChargingDemo.REPORT_QUOTA_USAGE, startMs, "REPORT_QUOTA_USAGE", 2000);
+            shc.incCounter(BaseChargingDemo.REPORT_QUOTA_USAGE);
+            // Must be last - tells the sending thread it can use this user again
+            userTS.endTran();
+        });
 
     }
 
-
-    public static Document addCredit(Document document, Gson g, long amount) {
-
-        UserTable theUserTable = new UserTable(document);
-
-        theUserTable.addCredit(amount, "AddCredit_" + amount + "_" + System.currentTimeMillis());
-        String jsonObject = g.toJson(theUserTable, UserTable.class);
-        return (Document.parse(jsonObject));
-
-
-    }
 
     /**
      * Turn latency stats into a grepable string

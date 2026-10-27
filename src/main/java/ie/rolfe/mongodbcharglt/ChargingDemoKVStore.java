@@ -15,7 +15,8 @@
 
 package ie.rolfe.mongodbcharglt;
 
-import com.mongodb.client.MongoClient;
+import com.mongodb.reactivestreams.client.MongoClient;
+
 
 import java.util.Arrays;
 

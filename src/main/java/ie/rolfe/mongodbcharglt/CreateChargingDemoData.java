@@ -15,9 +15,10 @@
 
 package ie.rolfe.mongodbcharglt;
 
+import com.mongodb.reactivestreams.client.MongoClient;
+
 
 import com.google.gson.Gson;
-import com.mongodb.client.MongoClient;
 import ie.rolfe.mongodbcharglt.documents.ExtraUserData;
 
 import java.util.Arrays;
@@ -59,13 +60,11 @@ public class CreateChargingDemoData extends BaseChargingDemo {
 
         try {
             MongoClient mainClient = connectMongoDB(hostlist);
-            MongoClient otherClient = connectMongoDB(hostlist);
 
-            upsertAllUsers(userCount, tpMs, ourJson, initialCredit, mainClient, otherClient);
+            upsertAllUsers(userCount, tpMs, ourJson, initialCredit, mainClient, getExtraMsIfSet());
 
             msg("Closing connection...");
             mainClient.close();
-            otherClient.close();
 
         } catch (Exception e) {
             msg(e.getMessage());

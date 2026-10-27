@@ -8,6 +8,11 @@
 
 package ie.rolfe.mongodbcharglt.documents;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonDeserializer;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSerializer;
 import ie.rolfe.mongodbcharglt.ReferenceData;
 import org.bson.Document;
 
@@ -30,6 +35,15 @@ public class UserTable extends AbstractBaseTable {
     public static final String ADDED_BY_TXN = " added by Txn ";
     public static final String ALREADY_HAPPENED = " already happened";
     public static long TX_KEEP_MS = 300000;
+
+    /**
+     * Dates are stored as epoch ms. Gson's default date format depends on the JVM's locale, so documents
+     * written by one JVM can't always be read by another.
+     */
+    public static final Gson GSON = new GsonBuilder()
+            .registerTypeAdapter(Date.class, (JsonSerializer<Date>) (src, typeOfSrc, context) -> new JsonPrimitive(src.getTime()))
+            .registerTypeAdapter(Date.class, (JsonDeserializer<Date>) (json, typeOfT, context) -> new Date(json.getAsLong()))
+            .create();
 
 
     public long _id;
@@ -97,6 +111,10 @@ public class UserTable extends AbstractBaseTable {
             }
         }
 
+    }
+
+    public Document toDocument() {
+        return Document.parse(GSON.toJson(this, UserTable.class));
     }
 
     public static UserTable getUserTable(ExtraUserData eud, long initialCredit, long id, long startMsUpsert) {

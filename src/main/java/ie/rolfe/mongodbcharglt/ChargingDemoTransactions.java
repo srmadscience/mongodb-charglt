@@ -15,8 +15,8 @@
 
 package ie.rolfe.mongodbcharglt;
 
-import com.google.gson.Gson;
-import com.mongodb.client.MongoClient;
+import com.mongodb.reactivestreams.client.MongoClient;
+
 
 import java.util.Arrays;
 
@@ -54,15 +54,13 @@ public class ChargingDemoTransactions extends BaseChargingDemo {
 
         try {
             MongoClient mainClient = connectMongoDB(hostlist);
-            MongoClient otherClient = connectMongoDB(hostlist);
 
-            clearUnfinishedTransactions(mainClient, userCount, new Gson());
+            clearUnfinishedTransactions(mainClient);
 
-            boolean ok = runTransactionBenchmark(userCount, tpMs, durationSeconds, globalQueryFreqSeconds, mainClient, otherClient, extraMs);
+            boolean ok = runTransactionBenchmark(userCount, tpMs, durationSeconds, globalQueryFreqSeconds, mainClient, extraMs);
 
             msg("Closing connection...");
             mainClient.close();
-            otherClient.close();
 
             if (ok) {
                 System.exit(0);

@@ -36,6 +36,9 @@ public class AbstractBaseTable {
             return null;
         } else if (tempObject instanceof Date) {
             return (Date) tempObject;
+        } else if (tempObject instanceof Number) {
+            // Written by UserTable.GSON as epoch ms
+            return new Date(((Number) tempObject).longValue());
         }
 
         Date dateTime = null;
