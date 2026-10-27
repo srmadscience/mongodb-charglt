@@ -44,6 +44,8 @@ Documents written by versions before epoch ms dates can't be read - delete and r
 * [voltdb-charglt](https://github.com/srmadscience/voltdb-charglt)
 * [s2-charglt](https://github.com/srmadscience/s2-charglt)
 * [redis-charglt](https://github.com/srmadscience/redis-charglt)
+* [oracle-charglt](https://github.com/srmadscience/oracle-charglt)
+* [postgres-charglt](https://github.com/srmadscience/postgres-charglt)
 
 ## TODO
  
